@@ -5,34 +5,37 @@
  *   musicSearch / musicUrl / musicLyric / musicPic
  *   songlistSearch / songlistDetail
  *
- * 全部走**匿名**波点接口（真机验证见 ../bodian 仓库的 verify 输出）：
- *   搜索     GET bd-api.kuwo.cn/api/search/music/list   （pn 从 0 开始；缺 devid 头会 402）
- *   播放地址 GET nmobi.kuwo.cn/mobi.s?type=convert_url_with_sign
- *            ↑ 匿名即可拿**完整音质**（FLAC 整曲、支持 Range），且**无需签名/无需 body**
- *   逐字歌词 GET mlyric.kuwo.cn/mobi.s?f=bodian （返回 base64 的逐字歌词）
- *   封面     meta.picUrl，缺失时回退 GET bd-api.kuwo.cn/api/service/music/info
- *   歌单搜索 GET bd-api.kuwo.cn/api/search/playlist/list?keyword=（注意是 keyword 不是 key）
- *   歌单曲目 GET bd-api.kuwo.cn/api/service/playlist/{id}/musicList?source=（pn 从 1 开始）
- *   歌单信息 GET bd-api.kuwo.cn/api/service/playlist/info/{id}?source=
+ * 两条播放通道（都经真机验证）：
+ *   A. 车机通道（**匿名**，无需签名、无需 body）
+ *      GET nmobi.kuwo.cn/mobi.s?type=convert_url_with_sign
+ *      → 普通歌给**完整 FLAC**（实测 52.8MB、Range 可用）；VIP 歌可能只给试听片段
+ *   B. 会员通道（需 uid/token；GET **带 body**，签名覆盖 body）
+ *      GET bd-api.kuwo.cn/api/play/music/v2/checkRight  → status=4 表示有播放权限
+ *      GET bd-api.kuwo.cn/api/play/music/v2/audioUrl    → bd-er.kuwo.cn（会员 CDN）
+ *      → 给车机通道拿不到完整音频的 VIP 歌兜底
  *
+ * `musicUrl` 选路：先走车机通道；若返回时长明显短于整曲（试听片段），再用会员通道。
+ *
+ * 其余接口：搜索 / 逐字歌词 / 封面 / 歌单，见各函数注释。
  * 注意本文件**不能**用 `Buffer` / `node:*`：扩展跑在受限 VM 里，编码一律走宿主的
- * `dataConverter`（见 shared/hostApi.ts 的说明）。
+ * `dataConverter`、md5 走宿主的 `utils.crypto`（见 shared/hostApi.ts）。
  */
-import { console, dataConverter, registerResourceAction, request } from './shared/hostApi'
+import { console, cryptoUtils, dataConverter, registerResourceAction, request } from './shared/hostApi'
 
 const API_ORIGIN = 'https://bd-api.kuwo.cn'
 const SEARCH_PATH = '/api/search/music/list'
 const MUSIC_INFO_PATH = '/api/service/music/info'
 const PLAYLIST_SEARCH_PATH = '/api/search/playlist/list'
+const AUDIO_URL_PATH = '/api/play/music/v2/audioUrl'
 
-/** 车机通道域名（完整的匿名音质来源），主域名失败时回退。 */
+/** 车机通道域名（匿名完整音质来源），主域名失败时回退。 */
 const CAR_ORIGIN = 'https://nmobi.kuwo.cn'
 const CAR_FALLBACK_ORIGIN = 'https://mobi.kuwo.cn'
 const CAR_SOURCE = 'kwplayercar_ar_6.0.0.9_B_jiakong_vh.apk'
 
 const LYRIC_ORIGIN = 'https://mlyric.kuwo.cn'
 
-/** 伪装波点 Windows 客户端（匿名即可通过校验）。 */
+/** 伪装波点 Windows 客户端（匿名即可通过校验；缺 devid/qimei36 会返回 402）。 */
 const CLIENT_HEADERS: Record<string, string> = {
   'user-agent': 'Dart/3.3 (dart:io)',
   plat: 'win',
@@ -54,11 +57,27 @@ const CAR_HEADERS: Record<string, string> = {
 const MOBILE_UA =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1'
 
-/** 匿名身份：`uid=-1`、空 token，外加一个实测可用的固定设备 id。 */
-const ANON_UID = '-1'
-const ANON_TOKEN = ''
+/** 设备 id（实测必需）。 */
 const DEV_ID = 'aabbccddeeff00112233445566778899'
 const CAR_USER = '12345'
+
+/**
+ * 账号凭据（扫码登录所得，仅在本机使用）。
+ *
+ * 取得方式（PyBodian 逆向出的流程，已实测）：
+ *   GET  /api/ucenter/login/qrCode       取登录码
+ *   GET  /api/ucenter/login/qrCodeStatus 轮询（status=3 表示已确认）
+ *   POST /api/ucenter/users/login        换取 uid/token
+ *
+ * 实测该账号 `isVip=1 / vipType=2`（不含无损），所以会员通道给到 320k；
+ * 普通歌仍走车机通道拿 FLAC。token 失效时把 AUTH_TOKEN 置空即退回纯匿名模式。
+ */
+// 账号凭据从 ./credentials 导入——该文件已在 .gitignore 中排除，避免把 token 提交进仓库
+import { AUTH_TOKEN, AUTH_UID } from './credentials'
+
+/** 匿名身份。 */
+const ANON_UID = '-1'
+const ANON_TOKEN = ''
 
 /** 本扩展的 source key，与 config.ts 里 `contributes.resource[].id` 保持一致。 */
 const SOURCE_ID = 'wd'
@@ -73,6 +92,9 @@ const QUALITY_BR: Record<string, string> = {
   flac: '2000kflac',
 }
 const DEFAULT_BR = '2000kflac'
+
+/** 判定「完整音频 vs 试听片段」的阈值（秒）。匿名试听实测只有 29 秒。 */
+const FULL_TRACK_MIN_SECONDS = 60
 
 interface BodianAudio {
   bitrate?: string | number
@@ -134,6 +156,17 @@ interface ConvertUrlResponse {
   data?: { url?: string; format?: string; bitrate?: number | string; duration?: number | string }
 }
 
+interface AudioUrlResponse {
+  code?: number
+  data?: {
+    audioHttpsUrl?: string
+    audioUrl?: string
+    format?: string
+    bitrate?: number | string
+    duration?: number | string
+  }
+}
+
 interface LyricResponse {
   code?: number
   data?: { content?: string }
@@ -142,6 +175,14 @@ interface LyricResponse {
 interface MusicInfoResponse {
   code?: number
   data?: { albumPic?: string; albumPic120?: string }
+}
+
+interface ResolvedUrl {
+  url: string
+  format: string
+  bitrate: number
+  duration: number
+  via: 'car' | 'vip'
 }
 
 /** 秒 → `mm:ss`（Any Listen 的 `interval` 格式，例：`03:55`）。 */
@@ -164,24 +205,332 @@ function requireRequest() {
   return request
 }
 
-function clientHeaders(): Record<string, string> {
-  return { ...CLIENT_HEADERS, devid: DEV_ID, qimei36: DEV_ID }
+function clientHeaders(uid: string, token: string): Record<string, string> {
+  return { ...CLIENT_HEADERS, devid: DEV_ID, qimei36: DEV_ID, uid, token }
 }
 
 /**
- * 把波点歌单的 `source` 编进 Any Listen 的列表 id。
- *
- * 原因：宿主只会把 `songlistDetail` 的 `id` 原样回传，而波点查歌单曲目**必须**带 `source`，
- * 所以用 `<source>_<id>` 的形式携带；解析时兼容纯数字 id（回退到默认 source）。
+ * md5（宿主的 `utils.crypto` 提供；VM 里没有 `node:crypto`）。
+ * 兼容几种可能的宿主 API 形态，拿不到就抛错——调用方会回退到无需签名的车机通道。
  */
-function encodeListId(source: string, id: string): string {
-  return `${source}_${id}`
+async function md5Hex(text: string): Promise<string> {
+  const candidate = cryptoUtils as unknown as {
+    createHash?: (algo: string) => { update: (d: string, enc?: string) => { digest: (enc: string) => string } }
+    md5?: (text: string) => string | Promise<string>
+  }
+
+  if (candidate && typeof candidate.md5 === 'function') {
+    return String(await candidate.md5(text))
+  }
+  if (candidate && typeof candidate.createHash === 'function') {
+    return candidate.createHash('md5').update(text, 'utf-8').digest('hex')
+  }
+  throw new Error('宿主未提供 md5（utils.crypto）')
 }
 
-function decodeListId(encoded: string): { source: string; id: string } {
-  const matched = /^(\d+)_(\d+)$/.exec(encoded)
-  if (matched) return { source: matched[1] ?? DEFAULT_PLAYLIST_SOURCE, id: matched[2] ?? encoded }
-  return { source: DEFAULT_PLAYLIST_SOURCE, id: encoded }
+/** Python `quote_plus` 兼容：JS 的 encodeURIComponent 会漏编码 `! * ' ( )`。 */
+function pyQuote(value: string): string {
+  return encodeURIComponent(value).replace(
+    /[!*'()]/g,
+    (char) => '%' + char.charCodeAt(0).toString(16).toUpperCase(),
+  )
+}
+
+function pyUrlencode(params: Array<[string, string]>): string {
+  return params.map(([k, v]) => `${pyQuote(String(k))}=${pyQuote(String(v))}`).join('&')
+}
+
+/** 波点签名：`md5("kuwotest" + sorted(字母数字(urlencode(params))) [+ md5(body+"kuwotest")] + path)`。 */
+async function bodianSign(path: string, params: Array<[string, string]>, bodyText = ''): Promise<string> {
+  const encoded = pyUrlencode(params)
+  const alnum = [...encoded].filter((ch) => /[A-Za-z0-9]/.test(ch)).sort().join('')
+  let seed = 'kuwotest' + alnum
+  if (bodyText) seed += await md5Hex(bodyText + 'kuwotest')
+  return md5Hex(seed + path)
+}
+
+/**
+ * 带签名的 GET（**允许带 body**）——会员通道要求的调用形态。
+ *
+ * 换成 POST 会得到 `500 Service error`；宿主 RequestOptions 里的 `text` 字段用于传原始 body。
+ */
+async function signedGet<T>(
+  path: string,
+  entries: Array<[string, string]>,
+  bodyText: string,
+  uid: string,
+  token: string,
+): Promise<T> {
+  const send = requireRequest()
+  const params: Array<[string, string]> = [...entries]
+  const sign = await bodianSign(path, params, bodyText)
+  params.push(['sign', sign])
+
+  const response = await send(`${API_ORIGIN}${path}?${pyUrlencode(params)}`, {
+    method: 'GET',
+    headers: clientHeaders(uid, token),
+    text: bodyText,
+    timeout: 20_000,
+  })
+
+  return response.body as T
+}
+
+/** 搜索歌曲。 */
+async function searchBodian(keyword: string, page: number, pageSize: number): Promise<BodianSearchItem[]> {
+  const send = requireRequest()
+
+  const response = await send(`${API_ORIGIN}${SEARCH_PATH}`, {
+    method: 'GET',
+    query: {
+      pn: String(Math.max(0, page - 1)),
+      rn: String(pageSize),
+      keyword,
+      correct: '1',
+      uid: ANON_UID,
+      token: ANON_TOKEN,
+    },
+    headers: clientHeaders(ANON_UID, ANON_TOKEN),
+    timeout: 15_000,
+  })
+
+  const body = response.body as BodianSearchResponse | undefined
+  if (!body || body.code !== 200) {
+    throw new Error(`波点搜索失败: code=${body?.code ?? 'N/A'} msg=${body?.msg ?? ''}`)
+  }
+
+  return body.data?.resultList ?? []
+}
+
+/** 搜索歌单（参数名是 `keyword`，不是 `key`）。 */
+async function searchPlaylists(keyword: string, page: number, pageSize: number): Promise<BodianPlaylistItem[]> {
+  const send = requireRequest()
+
+  const response = await send(`${API_ORIGIN}${PLAYLIST_SEARCH_PATH}`, {
+    method: 'GET',
+    query: {
+      keyword,
+      pn: String(Math.max(0, page - 1)),
+      rn: String(pageSize),
+      uid: ANON_UID,
+      token: ANON_TOKEN,
+    },
+    headers: clientHeaders(ANON_UID, ANON_TOKEN),
+    timeout: 15_000,
+  })
+
+  const body = response.body as BodianPlaylistSearchResponse | undefined
+  if (!body || body.code !== 200) {
+    throw new Error(`波点歌单搜索失败: code=${body?.code ?? 'N/A'}`)
+  }
+
+  return body.data?.resultList ?? []
+}
+
+/** 取歌单曲目（这个接口的 `pn` 从 1 开始）。 */
+async function fetchPlaylistTracks(
+  source: string,
+  id: string,
+  page: number,
+  pageSize: number,
+): Promise<{ list: BodianSearchItem[]; total: number }> {
+  const send = requireRequest()
+
+  const response = await send(`${API_ORIGIN}/api/service/playlist/${id}/musicList`, {
+    method: 'GET',
+    query: {
+      source,
+      pn: String(Math.max(1, page)),
+      rn: String(pageSize),
+      uid: ANON_UID,
+      token: ANON_TOKEN,
+    },
+    headers: clientHeaders(ANON_UID, ANON_TOKEN),
+    timeout: 20_000,
+  })
+
+  const body = response.body as BodianPlaylistMusicResponse | undefined
+  if (!body || body.code !== 200) {
+    throw new Error(`波点歌单曲目失败: code=${body?.code ?? 'N/A'} id=${id} source=${source}`)
+  }
+
+  const list = body.data?.list ?? []
+  return { list, total: Number(body.data?.total ?? list.length) }
+}
+
+/** 取歌单元数据。 */
+async function fetchPlaylistInfo(source: string, id: string): Promise<BodianPlaylistItem> {
+  const send = requireRequest()
+
+  const response = await send(`${API_ORIGIN}/api/service/playlist/info/${id}`, {
+    method: 'GET',
+    query: { source, uid: ANON_UID, token: ANON_TOKEN },
+    headers: clientHeaders(ANON_UID, ANON_TOKEN),
+    timeout: 15_000,
+  })
+
+  const body = response.body as BodianPlaylistInfoResponse | undefined
+  if (!body || body.code !== 200) return {}
+  return body.data ?? {}
+}
+
+/** 通道 A：车机（匿名、无需签名、无需 body）。 */
+async function resolveCarUrl(musicId: string, br: string): Promise<ResolvedUrl> {
+  const send = requireRequest()
+  const origins = [CAR_ORIGIN, CAR_FALLBACK_ORIGIN]
+  let lastError: unknown
+
+  for (const origin of origins) {
+    try {
+      const response = await send(`${origin}/mobi.s`, {
+        method: 'GET',
+        query: {
+          f: 'web',
+          source: CAR_SOURCE,
+          type: 'convert_url_with_sign',
+          rid: musicId,
+          br,
+          user: CAR_USER,
+          loginUid: CAR_USER,
+        },
+        headers: CAR_HEADERS,
+        timeout: 20_000,
+      })
+
+      const body = response.body as ConvertUrlResponse | undefined
+      const url = toText(body?.data?.url)
+      if (url) {
+        return {
+          url,
+          format: toText(body?.data?.format),
+          bitrate: Number(body?.data?.bitrate ?? 0),
+          duration: Number(body?.data?.duration ?? 0),
+          via: 'car',
+        }
+      }
+      lastError = new Error(`响应里没有 url @ ${origin}`)
+    } catch (error) {
+      lastError = error
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(`车机通道无法解析: ${musicId}`)
+}
+
+/** 通道 B：会员（GET 带 body + 签名）。 */
+async function resolveVipUrl(musicId: string, format: string, br: string): Promise<ResolvedUrl> {
+  const bodyText = JSON.stringify({ devId: DEV_ID, musicId, format, br, freeSign: '' })
+
+  const response = await signedGet<AudioUrlResponse>(
+    AUDIO_URL_PATH,
+    [
+      ['uid', AUTH_UID],
+      ['token', AUTH_TOKEN],
+      ['timestamp', String(Date.now())],
+      ['devId', DEV_ID],
+      ['musicId', musicId],
+      ['format', format],
+      ['br', br],
+      ['freeSign', ''],
+    ],
+    bodyText,
+    AUTH_UID,
+    AUTH_TOKEN,
+  )
+
+  const url = toText(response?.data?.audioHttpsUrl) || toText(response?.data?.audioUrl)
+  if (!url) throw new Error(`会员通道没有返回 URL: code=${response?.code ?? 'N/A'}`)
+
+  return {
+    url,
+    format: toText(response?.data?.format),
+    bitrate: Number(response?.data?.bitrate ?? 0),
+    duration: Number(response?.data?.duration ?? 0),
+    via: 'vip',
+  }
+}
+
+/** 拉取逐字歌词原文（`[00:00.000]<1120,-1120>晴<2400,160>天`）。 */
+async function fetchVerbatimLyric(musicId: string): Promise<string> {
+  const send = requireRequest()
+  const inner = `type=lyric&req=2&lrcx=1&rid=${musicId}&songname=&artist=&corp=kuwo&fromchannel=bodian`
+  const q = String(await dataConverter(inner, 'utf-8', 'base64'))
+
+  const response = await send(`${LYRIC_ORIGIN}/mobi.s`, {
+    method: 'GET',
+    query: { f: 'bodian', q, uid: ANON_UID, token: ANON_TOKEN },
+    headers: { 'user-agent': MOBILE_UA },
+    timeout: 15_000,
+  })
+
+  const body = response.body as LyricResponse | undefined
+  const content = toText(body?.data?.content)
+  if (!content) return ''
+
+  return String(await dataConverter(content, 'base64', 'utf-8'))
+}
+
+/**
+ * 把酷我的逐字歌词规范化成 Any Listen 认得的格式。
+ *
+ * 为什么必须做：Any Listen 校验逐字歌词用的是
+ *   `/(?:^|\s*)\[\d+:\d+(?:\.\d+)]<\d+,\d+>.+$/m`
+ * —— `<\d+,\d+>` **只接受正整数**。而酷我原始格式的第二项常常是负数：
+ *   `[00:00.000]<1120,-1120>晴<2400,160>天`
+ * 负号不匹配 `\d+`，整首逐字歌词会被判为无效，标记遂以纯文本漏到界面上（表现为歌词里出现 `<4788>`）。
+ *
+ * 处理方式：逐行取出每个字的起始时间，用「下一个字起始时间 − 当前字起始时间」重算持续时长
+ * （行末字给一个保守值），从而保证所有数字非负。
+ */
+function normalizeAwlyric(raw: string): string {
+  const out: string[] = []
+
+  for (const line of raw.split('\n')) {
+    const head = /^(\[\d+:\d+(?:\.\d+)?\])/.exec(line)
+    if (!head) {
+      out.push(line)
+      continue
+    }
+
+    const tag = head[1] ?? ''
+    const body = line.slice(head[0].length)
+    const words: Array<{ start: number; text: string }> = []
+    const wordRxp = /<(\d+),(-?\d+)>([^<]*)/g
+
+    let matched: RegExpExecArray | null
+    while ((matched = wordRxp.exec(body)) !== null) {
+      words.push({ start: Number(matched[1] ?? 0), text: matched[3] ?? '' })
+    }
+
+    if (words.length === 0) {
+      out.push(line)
+      continue
+    }
+
+    const rebuilt = words
+      .map((word, index) => {
+        const next = words[index + 1]
+        const duration = next ? Math.max(1, next.start - word.start) : 500
+        return `<${word.start},${duration}>${word.text}`
+      })
+      .join('')
+
+    out.push(tag + rebuilt)
+  }
+
+  return out.join('\n')
+}
+
+/** 去掉所有逐字时间标记，得到普通 LRC。 */
+function stripWordMarks(text: string): string {
+  return text.replace(/<[^>]*>/g, '')
+}
+
+/** 由实际音频信息反推 Any Listen 音质标识。 */
+function qualityFromAudio(format: string, bitrate: number, fallback: string): string {
+  if (format === 'flac') return 'flac'
+  if (format === 'mp3') return bitrate >= 320 ? '320k' : '128k'
+  return fallback
 }
 
 /**
@@ -215,171 +564,6 @@ function buildQualitys(item: BodianSearchItem): AnyListen.Music.MusicQualityType
   return qualitys
 }
 
-/** 调波点搜索接口，返回原始结果列表。 */
-async function searchBodian(keyword: string, page: number, pageSize: number): Promise<BodianSearchItem[]> {
-  const send = requireRequest()
-
-  const response = await send(`${API_ORIGIN}${SEARCH_PATH}`, {
-    method: 'GET',
-    query: {
-      pn: String(Math.max(0, page - 1)),
-      rn: String(pageSize),
-      keyword,
-      correct: '1',
-      uid: ANON_UID,
-      token: ANON_TOKEN,
-    },
-    headers: clientHeaders(),
-    timeout: 15_000,
-  })
-
-  const body = response.body as BodianSearchResponse | undefined
-  if (!body || body.code !== 200) {
-    throw new Error(`波点搜索失败: code=${body?.code ?? 'N/A'} msg=${body?.msg ?? ''}`)
-  }
-
-  return body.data?.resultList ?? []
-}
-
-/** 搜索波点歌单。 */
-async function searchPlaylists(keyword: string, page: number, pageSize: number): Promise<BodianPlaylistItem[]> {
-  const send = requireRequest()
-
-  const response = await send(`${API_ORIGIN}${PLAYLIST_SEARCH_PATH}`, {
-    method: 'GET',
-    query: {
-      keyword,
-      pn: String(Math.max(0, page - 1)),
-      rn: String(pageSize),
-      uid: ANON_UID,
-      token: ANON_TOKEN,
-    },
-    headers: clientHeaders(),
-    timeout: 15_000,
-  })
-
-  const body = response.body as BodianPlaylistSearchResponse | undefined
-  if (!body || body.code !== 200) {
-    throw new Error(`波点歌单搜索失败: code=${body?.code ?? 'N/A'}`)
-  }
-
-  return body.data?.resultList ?? []
-}
-
-/** 取歌单曲目（注意：波点这个接口的 `pn` 从 1 开始）。 */
-async function fetchPlaylistTracks(
-  source: string,
-  id: string,
-  page: number,
-  pageSize: number,
-): Promise<{ list: BodianSearchItem[]; total: number }> {
-  const send = requireRequest()
-
-  const response = await send(`${API_ORIGIN}/api/service/playlist/${id}/musicList`, {
-    method: 'GET',
-    query: {
-      source,
-      pn: String(Math.max(1, page)),
-      rn: String(pageSize),
-      uid: ANON_UID,
-      token: ANON_TOKEN,
-    },
-    headers: clientHeaders(),
-    timeout: 20_000,
-  })
-
-  const body = response.body as BodianPlaylistMusicResponse | undefined
-  if (!body || body.code !== 200) {
-    throw new Error(`波点歌单曲目失败: code=${body?.code ?? 'N/A'} id=${id} source=${source}`)
-  }
-
-  const list = body.data?.list ?? []
-  return { list, total: Number(body.data?.total ?? list.length) }
-}
-
-/** 取歌单元数据。 */
-async function fetchPlaylistInfo(source: string, id: string): Promise<BodianPlaylistItem> {
-  const send = requireRequest()
-
-  const response = await send(`${API_ORIGIN}/api/service/playlist/info/${id}`, {
-    method: 'GET',
-    query: { source, uid: ANON_UID, token: ANON_TOKEN },
-    headers: clientHeaders(),
-    timeout: 15_000,
-  })
-
-  const body = response.body as BodianPlaylistInfoResponse | undefined
-  if (!body || body.code !== 200) return {}
-  return body.data ?? {}
-}
-
-/** 通过车机通道解析播放地址（匿名、无需签名、无需 body）。 */
-async function resolveMusicUrl(
-  musicId: string,
-  br: string,
-): Promise<{ url: string; format: string; bitrate: number }> {
-  const send = requireRequest()
-  const origins = [CAR_ORIGIN, CAR_FALLBACK_ORIGIN]
-  let lastError: unknown
-
-  for (const origin of origins) {
-    try {
-      const response = await send(`${origin}/mobi.s`, {
-        method: 'GET',
-        query: {
-          f: 'web',
-          source: CAR_SOURCE,
-          type: 'convert_url_with_sign',
-          rid: musicId,
-          br,
-          user: CAR_USER,
-          loginUid: CAR_USER,
-        },
-        headers: CAR_HEADERS,
-        timeout: 20_000,
-      })
-
-      const body = response.body as ConvertUrlResponse | undefined
-      const url = toText(body?.data?.url)
-      if (url) {
-        return { url, format: toText(body?.data?.format), bitrate: Number(body?.data?.bitrate ?? 0) }
-      }
-      lastError = new Error(`响应里没有 url @ ${origin}`)
-    } catch (error) {
-      lastError = error
-    }
-  }
-
-  throw lastError instanceof Error ? lastError : new Error(`无法解析播放地址: ${musicId}`)
-}
-
-/** 拉取逐字歌词原文（`[00:00.000]<1120,-1120>晴<2400,160>天`）。 */
-async function fetchVerbatimLyric(musicId: string): Promise<string> {
-  const send = requireRequest()
-  const inner = `type=lyric&req=2&lrcx=1&rid=${musicId}&songname=&artist=&corp=kuwo&fromchannel=bodian`
-  const q = String(await dataConverter(inner, 'utf-8', 'base64'))
-
-  const response = await send(`${LYRIC_ORIGIN}/mobi.s`, {
-    method: 'GET',
-    query: { f: 'bodian', q, uid: ANON_UID, token: ANON_TOKEN },
-    headers: { 'user-agent': MOBILE_UA },
-    timeout: 15_000,
-  })
-
-  const body = response.body as LyricResponse | undefined
-  const content = toText(body?.data?.content)
-  if (!content) return ''
-
-  return String(await dataConverter(content, 'base64', 'utf-8'))
-}
-
-/** 由实际音频信息反推 Any Listen 音质标识。 */
-function qualityFromAudio(format: string, bitrate: number, fallback: string): string {
-  if (format === 'flac') return 'flac'
-  if (format === 'mp3') return bitrate >= 320 ? '320k' : '128k'
-  return fallback
-}
-
 /** 波点结果 → Any Listen 的 MusicInfoOnline。 */
 function toMusicInfoOnline(item: BodianSearchItem): AnyListen.Music.MusicInfoOnline {
   const musicId = toText(item.id)
@@ -402,6 +586,22 @@ function toMusicInfoOnline(item: BodianSearchItem): AnyListen.Music.MusicInfoOnl
       posTime: now,
     },
   }
+}
+
+/**
+ * 把波点歌单的 `source` 编进 Any Listen 的列表 id。
+ *
+ * 原因：宿主只会把 `songlistDetail` 的 `id` 原样回传，而波点查歌单曲目**必须**带 `source`，
+ * 所以用 `<source>_<id>` 的形式携带；解析时兼容纯数字 id（回退到默认 source）。
+ */
+function encodeListId(source: string, id: string): string {
+  return `${source}_${id}`
+}
+
+function decodeListId(encoded: string): { source: string; id: string } {
+  const matched = /^(\d+)_(\d+)$/.exec(encoded)
+  if (matched) return { source: matched[1] ?? DEFAULT_PLAYLIST_SOURCE, id: matched[2] ?? encoded }
+  return { source: DEFAULT_PLAYLIST_SOURCE, id: encoded }
 }
 
 /** 波点歌单 → Any Listen 的 SongListItem。 */
@@ -445,14 +645,35 @@ registerResourceAction({
 
     console.log(`[bodian] musicUrl musicId=${musicId} requested=${requested} br=${br}`)
 
-    const result = await resolveMusicUrl(musicId, br)
-    const actualQuality = qualityFromAudio(result.format, result.bitrate, requested)
+    // 先走车机通道（匿名即可，普通歌能拿完整 FLAC）
+    try {
+      const car = await resolveCarUrl(musicId, br)
+      const isFull = car.duration <= 0 || car.duration >= FULL_TRACK_MIN_SECONDS
+      console.log(
+        `[bodian] 车机通道: ${car.format}/${car.bitrate}kbps duration=${car.duration}s 完整=${isFull}`,
+      )
+      if (isFull) {
+        return { url: car.url, quality: qualityFromAudio(car.format, car.bitrate, requested) }
+      }
+    } catch (error) {
+      console.log(`[bodian] 车机通道失败: ${error instanceof Error ? error.message : String(error)}`)
+    }
 
-    console.log(
-      `[bodian] musicUrl 解析成功: ${result.format}/${result.bitrate}kbps → quality=${actualQuality} host=${result.url.split('/')[2] ?? ''}`,
-    )
+    // 车机通道只给了试听片段（VIP 歌）→ 会员通道兜底
+    if (AUTH_TOKEN) {
+      const fmt = (QUALITY_BR[requested] ?? DEFAULT_BR).endsWith('flac') ? 'flac' : 'mp3'
+      try {
+        const vip = await resolveVipUrl(musicId, fmt, br)
+        console.log(
+          `[bodian] 会员通道: ${vip.format}/${vip.bitrate}kbps duration=${vip.duration}s host=${vip.url.split('/')[2] ?? ''}`,
+        )
+        return { url: vip.url, quality: qualityFromAudio(vip.format, vip.bitrate, requested) }
+      } catch (error) {
+        console.log(`[bodian] 会员通道失败: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
 
-    return { url: result.url, quality: actualQuality }
+    throw new Error(`两条通道都无法解析播放地址: ${musicId}`)
   },
 
   musicLyric: async (params) => {
@@ -462,14 +683,17 @@ registerResourceAction({
     console.log(`[bodian] musicLyric musicId=${musicId}`)
 
     const verbatim = await fetchVerbatimLyric(musicId)
-    // 去掉逐字时间标记即为普通 LRC；原文（含标记）就是 Any Listen 的 awlyric 格式
-    const lyric = verbatim.replace(/<-?\d+,-?\d+>/g, '')
+    // 酷我的 `<开始,-持续>` 含负号，而 Any Listen 只认 `<\d+,\d+>`，必须先规范化
+    const awlyric = normalizeAwlyric(verbatim)
+    const lyric = stripWordMarks(awlyric)
 
-    console.log(`[bodian] musicLyric 逐字=${verbatim.includes('<') && verbatim.includes(',')} 长度=${verbatim.length}`)
+    console.log(
+      `[bodian] musicLyric 原始=${verbatim.length} 规范化后=${awlyric.length} 通过校验=${/(?:^|\s*)\[\d+:\d+(?:\.\d+)?\]<\d+,\d+>/.test(awlyric)}`,
+    )
 
     return {
       lyric,
-      awlyric: verbatim || null,
+      awlyric: awlyric || null,
       name: info.name,
       singer: info.singer,
       interval: info.interval,
@@ -484,7 +708,7 @@ registerResourceAction({
     const response = await send(`${API_ORIGIN}${MUSIC_INFO_PATH}`, {
       method: 'GET',
       query: { musicId: info.meta.musicId, uid: ANON_UID, token: ANON_TOKEN },
-      headers: clientHeaders(),
+      headers: clientHeaders(ANON_UID, ANON_TOKEN),
       timeout: 15_000,
     })
 
@@ -501,7 +725,9 @@ registerResourceAction({
     const items = await searchPlaylists(params.keyword, page, limit)
     const list = items.map(toSongListItem)
 
-    console.log(`[bodian] songlistSearch 返回 ${list.length} 个歌单，首个: ${list[0]?.name ?? '(空)'} (${list[0]?.total ?? 0} 首)`)
+    console.log(
+      `[bodian] songlistSearch 返回 ${list.length} 个歌单，首个: ${list[0]?.name ?? '(空)'} (${list[0]?.total ?? 0} 首)`,
+    )
 
     return { list, total: list.length, page, limit }
   },
@@ -538,5 +764,5 @@ registerResourceAction({
 })
 
 console.log(
-  `[bodian] 波点音乐扩展已注册 musicSearch/musicUrl/musicLyric/musicPic/songlistSearch/songlistDetail（source=${SOURCE_ID}）`,
+  `[bodian] 波点音乐扩展已注册 musicSearch/musicUrl/musicLyric/musicPic/songlistSearch/songlistDetail（source=${SOURCE_ID}，账号=${AUTH_TOKEN ? AUTH_UID : '匿名'}）`,
 )

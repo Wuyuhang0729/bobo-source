@@ -5,3 +5,6 @@ unpacked/
 
 # 签名私钥，绝不入库
 .env
+
+# 账号凭据（扫码登录所得），绝不入库
+src/credentials.ts

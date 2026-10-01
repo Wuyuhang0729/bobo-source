@@ -1,0 +1,24 @@
+{
+  "name": "any-listen-extension-bodian",
+  "version": "0.1.0",
+  "private": true,
+  "keywords": [
+    "any-listen",
+    "any-listen-extension",
+    "bodian"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "extension-kit --build",
+    "typecheck": "tsc -p tsconfig.app.json --noEmit"
+  },
+  "devDependencies": {
+    "@any-listen/extension-kit": "^0.1.17",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">= 22"
+  }
+}

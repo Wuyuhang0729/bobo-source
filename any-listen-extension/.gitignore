@@ -1,0 +1,7 @@
+node_modules/
+dist/
+build/
+unpacked/
+
+# 签名私钥，绝不入库
+.env

@@ -8,9 +8,17 @@ dist/
 .reasonix/
 
 # ── Folia 播放器源码 ──────────────────────────────────────────────
-# 上游独立仓库（自带 .git），单独 git pull 更新，不进本库。
-# 但例外：我们自己写的波点模组必须入库，所以用「排除全部 → 逐层放行」。
+# 上游独立仓库，单独 git pull 更新，不进本库。
+#
+# ⚠️ folia/.git 千万不要改名或删除：Tailwind v4 靠它定位「项目根」来做内容扫描，
+#    一旦找不到，utility class 全部不生成（index.css 从 252KB 掉到 12KB），
+#    界面会变成没有样式的裸文字。git 把它当嵌套仓库的警告可以忽略——
+#    下面的「排除全部 → 逐层放行」规则足以让主仓库只跟踪我们自己的模组。
 folia/*
 !folia/mods/
 folia/mods/*
 !folia/mods/bodian-source/
+
+# 模组内 vendored 的 bodian 库由 tools/sync-bodian-vendor.mjs 从 any-listen/dist
+# 生成，不重复入库（换了机器先跑一次该脚本）。
+folia/mods/bodian-source/vendor/

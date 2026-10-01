@@ -20,7 +20,14 @@
  * 注意本文件**不能**用 `Buffer` / `node:*`：扩展跑在受限 VM 里，编码一律走宿主的
  * `dataConverter`、md5 走宿主的 `utils.crypto`（见 shared/hostApi.ts）。
  */
-import { console, cryptoUtils, dataConverter, registerResourceAction, request } from './shared/hostApi'
+import {
+  console,
+  cryptoUtils,
+  dataConverter,
+  registerListProviderAction,
+  registerResourceAction,
+  request,
+} from './shared/hostApi'
 
 const API_ORIGIN = 'https://bd-api.kuwo.cn'
 const SEARCH_PATH = '/api/search/music/list'
@@ -82,8 +89,15 @@ const ANON_TOKEN = ''
 /** 本扩展的 source key，与 config.ts 里 `contributes.resource[].id` 保持一致。 */
 const SOURCE_ID = 'wd'
 
-/** 歌单来源类型的兜底值（实测歌单搜索返回的 source 就是 4）。 */
-const DEFAULT_PLAYLIST_SOURCE = '4'
+/**
+ * 歌单来源类型的兜底值。
+ *
+ * 实测两套值不一样（别写死成一个）：
+ *   - 搜索结果里的歌单（songlistSearch）→ source = 4
+ *   - 账号自建歌单（/api/service/playlist/userCreate）→ source = 5
+ * 所以 syncId / listId 里会带 `<source>_<id>` 前缀，这里只是没有前缀时的兜底。
+ */
+const DEFAULT_PLAYLIST_SOURCE = '5'
 
 /** Any Listen 音质标识 → 波点 `br` 参数（形如 `2000kflac`）。 */
 const QUALITY_BR: Record<string, string> = {
@@ -739,17 +753,28 @@ registerResourceAction({
 
     console.log(`[bodian] songlistDetail id=${id} source=${source} page=${page} limit=${limit}`)
 
-    const [tracks, detail] = await Promise.all([
-      fetchPlaylistTracks(source, id, page, limit),
-      fetchPlaylistInfo(source, id),
-    ])
-    const list = tracks.list.map(toMusicInfoOnline)
+    // 波点单页有条数上限，宿主可能一次要很多首（limit=10000），所以这里自己分页拉全。
+    const perPage = 100
+    const wanted = Math.min(limit, 1000)
+    const collected: BodianSearchItem[] = []
+    let total = 0
 
-    console.log(`[bodian] songlistDetail 返回 ${list.length}/${tracks.total} 首，歌单名: ${toText(detail.name)}`)
+    for (let p = page; p <= page + 20; p += 1) {
+      const chunk = await fetchPlaylistTracks(source, id, p, perPage)
+      total = chunk.total
+      if (chunk.list.length === 0) break
+      collected.push(...chunk.list)
+      if (collected.length >= wanted || collected.length >= total) break
+    }
+
+    const detail = await fetchPlaylistInfo(source, id)
+    const list = collected.slice(0, wanted).map(toMusicInfoOnline)
+
+    console.log(`[bodian] songlistDetail 返回 ${list.length}/${total} 首，歌单名: ${toText(detail.name)}`)
 
     return {
       list,
-      total: tracks.total,
+      total,
       page,
       limit,
       info: {
@@ -762,6 +787,113 @@ registerResourceAction({
     }
   },
 })
+
+/**
+ * 「列表提供者」（listProvider）实现。
+ *
+ * Any Listen 的「我的列表 → 远程歌单」由它供数：用户在客户端里添加一个远程歌单
+ * （带 extensionId + source + syncId）后，宿主会回调这里要「歌曲 id 列表」和「歌曲详情」。
+ *
+ * 对应波点接口（均已用登录态实测）：
+ *   歌单曲目 GET /api/service/playlist/{id}/musicList?source=&pn=1&rn=100
+ *   我创建的 GET /api/service/playlist/userCreate?userId=
+ *   我收藏的 GET /api/service/collect/4/list?userId=&fromUid=&pn=&rn=
+ */
+async function listMusicIds(listRef: string): Promise<string[]> {
+  const { source, id } = decodeListId(listRef)
+  const ids: string[] = []
+
+  for (let page = 1; page <= 20; page += 1) {
+    const tracks = await fetchPlaylistTracks(source, id, page, 100)
+    if (tracks.list.length === 0) break
+    for (const item of tracks.list) ids.push(toText(item.id))
+    if (ids.length >= tracks.total) break
+  }
+
+  return ids
+}
+
+/** 取账号自带的歌单（我创建的 / 我收藏的），仅用于日志核对。 */
+async function fetchMyPlaylists(): Promise<{ created: BodianPlaylistItem[]; collected: BodianPlaylistItem[] }> {
+  const send = requireRequest()
+
+  const safe = async (path: string, query: Record<string, string>): Promise<BodianPlaylistItem[]> => {
+    try {
+      const response = await send(`${API_ORIGIN}${path}`, {
+        method: 'GET',
+        query: { ...query, uid: AUTH_UID, token: AUTH_TOKEN },
+        headers: clientHeaders(AUTH_UID, AUTH_TOKEN),
+        timeout: 20_000,
+      })
+      const body = response.body as { data?: { playLists?: BodianPlaylistItem[] } } | undefined
+      return body?.data?.playLists ?? []
+    } catch {
+      return []
+    }
+  }
+
+  const [created, collected] = await Promise.all([
+    safe('/api/service/playlist/userCreate', { userId: AUTH_UID }),
+    safe('/api/service/collect/4/list', { userId: AUTH_UID, fromUid: AUTH_UID, pn: '1', rn: '200' }),
+  ])
+
+  return { created, collected }
+}
+
+if (typeof registerListProviderAction === 'function' && AUTH_TOKEN) {
+  registerListProviderAction({
+    getListMusicIds: async ({ data }) => {
+      const syncId = toText((data as { syncId?: string } | undefined)?.syncId)
+      console.log(`[bodian] getListMusicIds syncId=${syncId}`)
+      try {
+        const ids = await listMusicIds(syncId)
+        console.log(`[bodian] getListMusicIds 返回 ${ids.length} 个 id`)
+        return ids
+      } catch (error) {
+        console.log(`[bodian] getListMusicIds 失败: ${error instanceof Error ? error.message : String(error)}`)
+        return []
+      }
+    },
+
+    getMusicInfoByIds: async ({ data }) => {
+      const payload = data as { ids?: string[]; list?: { syncId?: string } } | undefined
+      const ids = payload?.ids ?? []
+      const syncId = toText(payload?.list?.syncId)
+      console.log(`[bodian] getMusicInfoByIds syncId=${syncId} 请求 ${ids.length} 首`)
+
+      try {
+        const { source, id } = decodeListId(syncId)
+        const want = new Set(ids)
+        const musics: AnyListen.Music.MusicInfoOnline[] = []
+
+        for (let page = 1; page <= 20 && musics.length < ids.length; page += 1) {
+          const tracks = await fetchPlaylistTracks(source, id, page, 100)
+          if (tracks.list.length === 0) break
+          for (const item of tracks.list) {
+            if (want.has(toText(item.id))) musics.push(toMusicInfoOnline(item))
+          }
+        }
+
+        console.log(`[bodian] getMusicInfoByIds 返回 ${musics.length} 首`)
+        return { musics }
+      } catch (error) {
+        console.log(`[bodian] getMusicInfoByIds 失败: ${error instanceof Error ? error.message : String(error)}`)
+        return { musics: [] }
+      }
+    },
+  })
+
+  // 顺带把账号里的歌单打进日志：远程歌单需要用户在客户端里指定 syncId（= 歌单 id）
+  void fetchMyPlaylists()
+    .then(({ created, collected }) => {
+      console.log(`[bodian] 账号歌单：我创建的 ${created.length} 个，我收藏的 ${collected.length} 个`)
+      for (const item of created.slice(0, 40)) console.log(`[bodian]   创建 ${item.name} (id=${item.id})`)
+      for (const item of collected.slice(0, 40)) console.log(`[bodian]   收藏 ${item.name} (id=${item.id})`)
+    })
+    .catch(() => {})
+
+  console.log('[bodian] 已注册 listProvider（供「我的列表 → 远程歌单」使用）')
+}
 
 console.log(
   `[bodian] 波点音乐扩展已注册 musicSearch/musicUrl/musicLyric/musicPic/songlistSearch/songlistDetail（source=${SOURCE_ID}，账号=${AUTH_TOKEN ? AUTH_UID : '匿名'}）`,

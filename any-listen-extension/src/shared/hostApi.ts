@@ -58,6 +58,14 @@ export const console = {
 
 export const version = api.env.version
 export const registerResourceAction = api.registerResourceAction
+
+/**
+ * 注册「列表提供者」：让扩展为「我的列表」里的**远程歌单**供数。
+ * 需要 config.ts 里声明 `grant: ['internet', 'music_list']`。
+ */
+export const registerListProviderAction = (
+  api as { registerListProviderAction?: (actions: Partial<AnyListen_API.ListProviderAction>) => void }
+).registerListProviderAction
 export const t = api.t
 export const cryptoUtils = api.utils.crypto
 

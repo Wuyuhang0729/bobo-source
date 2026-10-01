@@ -22,7 +22,7 @@ const config: ExtensionConfig = {
   target_engine: '1.0.0',
   categories: ['music'],
   tags: ['bodian', 'kuwo', 'music-source', 'wd'],
-  grant: ['internet'],
+  grant: ['internet', 'music_list'],
   contributes: {
     resource: [
       {

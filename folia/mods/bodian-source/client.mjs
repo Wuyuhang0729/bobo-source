@@ -10,13 +10,16 @@
 // （WebCrypto 只有 SHA 系列）。所以真正的请求全部经 folium.rpc 交给 main 入口
 // 用 Node 的 crypto + https 完成。
 //
-// 阶段：S1 —— 先只验证「模组能加载 / provider 能注册 / 搜索能出结果」。
-// 把 USE_FAKE 改成 false 即切到真实接口（S2 起）。
+// 阶段：S1/S2 —— 先验证「模组能加载 / provider 能注册 / 搜索能出结果」。
+// 把 USE_FAKE 改成 false 即切到真实接口调用。
+//
+// 注意：rpc 名字必须匹配 /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/，也就是**不能用冒号**，
+// 所以这里统一用 `bodian.` 前缀。
 
 const USE_FAKE = true;
 
 /** provider 回调里所有网络动作都走 main，这里只是转发。 */
-const call = (name, ...args) => folium.rpc.call(`bodian:${name}`, ...args);
+const call = (name, ...args) => folium.rpc.call(`bodian.${name}`, ...args);
 
 /** S1 假数据：用来确认链路通，字段形状与真实 provider 完全一致。 */
 const FAKE_SONGS = [

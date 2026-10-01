@@ -6,3 +6,11 @@ dist/
 
 # Reasonix 会话状态（宿主生成，不入库）
 .reasonix/
+
+# ── Folia 播放器源码 ──────────────────────────────────────────────
+# 上游独立仓库（自带 .git），单独 git pull 更新，不进本库。
+# 但例外：我们自己写的波点模组必须入库，所以用「排除全部 → 逐层放行」。
+folia/*
+!folia/mods/
+folia/mods/*
+!folia/mods/bodian-source/

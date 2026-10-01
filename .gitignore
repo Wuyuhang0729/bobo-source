@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+.verify-out/
+
+# Reasonix 会话状态（宿主生成，不入库）
+.reasonix/

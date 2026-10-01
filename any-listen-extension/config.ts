@@ -14,7 +14,7 @@ import type { ExtensionConfig } from '@any-listen/extension-kit/config'
 const config: ExtensionConfig = {
   id: 'bodian',
   name: '波点音乐',
-  version: '0.2.0',
+  version: '0.2.1',
   description: '波点音乐音源（Bodian）：搜索 / 完整音质播放地址 / 逐字歌词 / 封面',
   author: 'bodian',
   homepage: 'https://github.com/',

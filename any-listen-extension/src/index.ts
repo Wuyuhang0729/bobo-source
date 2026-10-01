@@ -66,6 +66,13 @@ const QUALITY_BR: Record<string, string> = {
 }
 const DEFAULT_BR = '2000kflac'
 
+interface BodianAudio {
+  bitrate?: string | number
+  format?: string
+  level?: string
+  size?: string
+}
+
 interface BodianSearchItem {
   id?: number | string
   name?: string
@@ -74,6 +81,7 @@ interface BodianSearchItem {
   album?: string
   albumPic?: string
   duration?: number | string
+  audios?: BodianAudio[]
 }
 
 interface BodianSearchResponse {
@@ -115,6 +123,37 @@ function requireRequest() {
     throw new Error('宿主 request 不可用：请确认 config.ts 的 grant 里声明了 "internet"')
   }
   return request
+}
+
+/**
+ * 从波点 `audios[]` 构造 Any Listen 要求的 `meta.qualitys`。
+ *
+ * 这个字段是**必需的**：宿主会校验每条搜索结果，`qualitys` 为 null/空会把整条结果丢掉
+ * （实测日志：`verify music search array item error ... meta.qualitys is null`）。
+ *
+ * 只保留能直接播放的三档；`mflac`/`mgg`/`zp` 是 DRM 加密容器，ogg/aac 在 Any Listen
+ * 侧没有对应档位，一律不列。若某首歌一条都不匹配，则兜底给三档空 size，避免结果被丢弃。
+ */
+function buildQualitys(item: BodianSearchItem): AnyListen.Music.MusicQualityType {
+  const qualitys: AnyListen.Music.MusicQualityType = {}
+
+  for (const audio of item.audios ?? []) {
+    const format = String(audio.format ?? '').toLowerCase()
+    const bitrate = Number(audio.bitrate ?? 0)
+    const sizeStr = audio.size ? String(audio.size) : null
+
+    if (format === 'mp3' && bitrate === 128) qualitys['128k'] = { sizeStr }
+    else if (format === 'mp3' && bitrate === 320) qualitys['320k'] = { sizeStr }
+    else if (format === 'flac' && bitrate === 2000) qualitys.flac = { sizeStr }
+  }
+
+  if (Object.keys(qualitys).length === 0) {
+    qualitys['128k'] = { sizeStr: null }
+    qualitys['320k'] = { sizeStr: null }
+    qualitys.flac = { sizeStr: null }
+  }
+
+  return qualitys
 }
 
 /** 调波点搜索接口，返回原始结果列表。 */
@@ -226,6 +265,7 @@ function toMusicInfoOnline(item: BodianSearchItem): AnyListen.Music.MusicInfoOnl
       albumName: toText(item.album),
       picUrl: toText(item.albumPic) || null,
       source: SOURCE_ID,
+      qualitys: buildQualitys(item),
       createTime: now,
       updateTime: now,
       posTime: now,
@@ -244,7 +284,9 @@ registerResourceAction({
     const items = await searchBodian(keyword, page, limit)
     const list = items.map(toMusicInfoOnline)
 
-    console.log(`[bodian] musicSearch 返回 ${list.length} 条，首条: ${list[0]?.name ?? '(空)'}`)
+    console.log(
+      `[bodian] musicSearch 返回 ${list.length} 条，首条: ${list[0]?.name ?? '(空)'}，qualitys=${JSON.stringify(list[0]?.meta.qualitys ?? null)}`,
+    )
 
     return { list, total: list.length, page, limit }
   },

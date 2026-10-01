@@ -14,8 +14,8 @@ import type { ExtensionConfig } from '@any-listen/extension-kit/config'
 const config: ExtensionConfig = {
   id: 'bodian',
   name: '波点音乐',
-  version: '0.2.1',
-  description: '波点音乐音源（Bodian）：搜索 / 完整音质播放地址 / 逐字歌词 / 封面',
+  version: '0.3.0',
+  description: '波点音乐音源（Bodian）：搜索 / 完整音质播放地址 / 逐字歌词 / 封面 / 歌单',
   author: 'bodian',
   homepage: 'https://github.com/',
   license: 'MIT',
@@ -28,7 +28,14 @@ const config: ExtensionConfig = {
       {
         id: 'wd',
         name: '波点音乐',
-        resource: ['musicSearch', 'musicUrl', 'musicLyric', 'musicPic'],
+        resource: [
+          'musicSearch',
+          'musicUrl',
+          'musicLyric',
+          'musicPic',
+          'songlistSearch',
+          'songlistDetail',
+        ],
       },
     ],
   },

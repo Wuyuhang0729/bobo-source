@@ -194,16 +194,22 @@ tools\start-folia.bat               # 开发运行 = vite + ELECTRON_DEV=true + 
 ### 出一份能直接安装的安装包
 
 ```powershell
-cd folia
-npm run build                                    # 前端产物 → dist/
+node tools/build-installer.mjs --dry-run   # 先看它会做什么（不耗时）
+node tools/build-installer.mjs             # 真出包：同步依赖 → vite build → electron-builder
+# → folia/release/Folia-Setup-<上游版本>.exe（约 140 MB）
+# → tools/out/installer-info.txt（记录 安装包版本 ↔ 内嵌模组版本 ↔ folia 提交）
+```
 
-# 首次打包要从 GitHub 下载 nsis / winCodeSign 等工具，国内直连大概率 ETIMEDOUT
-# （报错形如 connect ETIMEDOUT 20.205.243.166:443），换成国内镜像：
+脚本里写死了两个镜像环境变量：首次打包要从 GitHub 下载 nsis / winCodeSign 等工具，
+国内直连大概率 ETIMEDOUT（报错形如 `connect ETIMEDOUT 20.205.243.166:443`）。
+手工等价命令：
+
+```powershell
+cd folia
 $env:ELECTRON_BUILDER_BINARIES_MIRROR='https://npmmirror.com/mirrors/electron-builder-binaries/'
 $env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'
-
+npm run build
 npx electron-builder --win nsis --publish never
-# → folia/release/Folia-Setup-<版本>.exe（约 140 MB，实测 0.7.11 打包通过）
 ```
 
 `folia/package.json` 的 `extraResources` 已经把 `mods/bodian-source` 打进 `resources/mods/`

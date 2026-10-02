@@ -177,11 +177,18 @@ tools\start-folia.bat               # 开发运行 = vite + ELECTRON_DEV=true + 
 ```powershell
 cd folia
 npm run build                                    # 前端产物 → dist/
+
+# 首次打包要从 GitHub 下载 nsis / winCodeSign 等工具，国内直连大概率 ETIMEDOUT
+# （报错形如 connect ETIMEDOUT 20.205.243.166:443），换成国内镜像：
+$env:ELECTRON_BUILDER_BINARIES_MIRROR='https://npmmirror.com/mirrors/electron-builder-binaries/'
+$env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'
+
 npx electron-builder --win nsis --publish never
-# → folia/release/Folia-Setup-<version>.exe
+# → folia/release/Folia-Setup-<版本>.exe（约 140 MB，实测 0.7.11 打包通过）
 ```
 
-`folia/package.json` 的 `extraResources` 已经把 `mods/bodian-source` 打进 `resources/mods/`，
+`folia/package.json` 的 `extraResources` 已经把 `mods/bodian-source` 打进 `resources/mods/`
+（实测装包内有 `resources/mods/bodian-source/{mod.json,index.cjs,client.mjs,vendor,node_modules}`），
 所以装完就有这个音源 —— 启动 Folia → 设置 → 系统 → 模组 → 启用「波点音乐」并确认一次。
 注意**安装版没有开发源豁免**：装好后别再改安装目录里的模组文件，改了会被判为内容变化并自动禁用
 （要改就改仓库里的那份，重新打包）。

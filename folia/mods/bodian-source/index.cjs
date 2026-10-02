@@ -21,12 +21,27 @@ const http = require('node:http');
 const https = require('node:https');
 const { URL: NodeURL } = require('node:url');
 const {
+    BodianApiError,
     BodianClient,
     BODIAN_API_ORIGIN,
     DEFAULT_CLIENT_HEADERS,
     bodianSign,
     httpRequest,
 } = require('./vendor/bodian');
+// 纯映射 / 编解码 / 错误分类都在 lib/ 下，由 tools/test-mod.mjs 跑单测盯着
+const { encodeCollectionId, decodeCollectionId } = require('./lib/ids.cjs');
+const {
+    toProviderSongFromTrackList,
+    toProviderSongFromSearch,
+    pickSongList,
+    toPageNumber,
+    isCollectedAlbum,
+    toCollectionFromCreated,
+    toCollectionFromCollected,
+    toAlbumFromCollected,
+    toRecommendedCollection,
+} = require('./lib/mapping.cjs');
+const { describeFailure, formatFailure } = require('./lib/errors.cjs');
 
 const nodeHttpRequest = http.request;
 const nodeHttpsRequest = https.request;
@@ -99,8 +114,68 @@ module.exports = function activate(api) {
         qimei36: DEV_ID,
     });
 
-    /** 带签名的 bd-api GET。 */
-    const signedGet = async (path, params = {}) => {
+    /**
+     * 信封校验：与库的 requestJson 同一套判定。
+     *
+     * HTTP 非 200 / 响应不是 JSON / `code !== 200` 一律抛 BodianApiError。
+     * 之前这里直接 `JSON.parse(response.text)` 返回，`code=-101`（签名、devid 绑定或 token
+     * 失效）这类失败会带着 `data === undefined` 一路往下走，最后变成"空列表" ——
+     * 用户和日志都看不出是被上游拒了。
+     */
+    const parseEnvelope = (path, response) => {
+        if (response && response.status !== undefined && Number(response.status) !== 200) {
+            throw new BodianApiError(`HTTP ${response.status} @ ${path}`, {
+                code: Number(response.status),
+                path,
+                raw: String(response.text || '').slice(0, 300),
+            });
+        }
+        let parsed;
+        try {
+            parsed = JSON.parse(response.text);
+        } catch {
+            throw new BodianApiError(`响应不是合法 JSON @ ${path}`, {
+                code: -1,
+                path,
+                raw: String(response.text || '').slice(0, 300),
+            });
+        }
+        if (parsed && typeof parsed === 'object' && parsed.code !== undefined && Number(parsed.code) !== 200) {
+            throw new BodianApiError(`接口错误 code=${parsed.code} msg=${parsed.msg ?? ''} @ ${path}`, {
+                code: Number(parsed.code),
+                path,
+                raw: parsed,
+            });
+        }
+        return parsed;
+    };
+
+    /** 统一失败日志：一行里带 kind/code/msg，grep `kind=` 就能筛查。 */
+    const logFailure = (scope, error) => {
+        const failure = describeFailure(error);
+        api.log.warn(`[bodian] ${scope} 失败 ${formatFailure(failure)}`);
+        return failure;
+    };
+
+    /**
+     * 列表类回调的失败出口：记日志，然后把空结果还给宿主。
+     *
+     * 为什么仍然返回空而不是抛：音源"这一次没取到"是常态（网络抖动、上游限流），
+     * 抛出去会让宿主整屏报错，比空列表更糟。真正要点开的东西（曲目、播放地址、歌词）
+     * 不在这里 —— 它们照旧抛错或返回 null，让界面能明确说"这条不行"。
+     */
+    const failEmpty = (scope, error, emptyValue) => {
+        logFailure(scope, error);
+        return emptyValue;
+    };
+
+    /**
+     * 带签名的 bd-api GET。
+     *
+     * `lenient` 用于登录链路：那几条接口的"未扫码/未确认"状态本身就可能伴随非 200 的
+     * 信封值，收紧校验反而会破坏已验证的扫码流程，所以只在非登录路径严格校验。
+     */
+    const signedGet = async (path, params = {}, { lenient = false } = {}) => {
         const merged = { ...params, uid: auth.uid, token: auth.token, timestamp: Date.now() };
         const entries = Object.entries(merged).map(([key, value]) => [key, String(value)]);
         const sign = bodianSign(path, entries);
@@ -108,7 +183,7 @@ module.exports = function activate(api) {
         const response = await httpRequest(`${BODIAN_API_ORIGIN}${path}?${query}`, {
             headers: clientHeaders(),
         });
-        return JSON.parse(response.text);
+        return lenient ? JSON.parse(response.text) : parseEnvelope(path, response);
     };
 
     /** 带签名的 bd-api POST（登录换票用）。 */
@@ -123,7 +198,7 @@ module.exports = function activate(api) {
             headers: clientHeaders(),
             body: bodyText,
         });
-        return JSON.parse(response.text);
+        return parseEnvelope(path, response);
     };
 
     /** 启动时恢复上次的登录态。 */
@@ -149,40 +224,32 @@ module.exports = function activate(api) {
         }
     };
 
-    /** BodianSong → FoliumProviderSong。字段缺省时整个键省略，避免回传 null。 */
-    const toProviderSong = (song) => {
-        const artists = Array.isArray(song.artists) && song.artists.length
-            ? song.artists.map((artist) => artist && artist.name).filter(Boolean)
-            : (song.artist ? String(song.artist).split('&').map((name) => name.trim()).filter(Boolean) : []);
-        return {
-            id: String(song.id),
-            title: String(song.name ?? ''),
-            artists,
-            ...(song.album ? { album: String(song.album) } : {}),
-            ...(song.cover || song.coverSmall ? { coverUrl: String(song.cover || song.coverSmall) } : {}),
-            ...(Number.isFinite(song.duration) && song.duration > 0
-                ? { durationMs: Math.round(song.duration * 1000) }
-                : {}),
-        };
-    };
-
     // ---------------------------------------------------------------- 搜索
     api.rpc.handle('bodian.search', async (query, page) => {
         const limit = Number(page && page.limit) > 0 ? Number(page.limit) : 20;
         const offset = Number(page && page.offset) > 0 ? Number(page.offset) : 0;
-        // 库的 page 从 1 开始计数，而 Folia 给的是 offset
-        const pageNumber = Math.floor(offset / limit) + 1;
 
-        const list = await client.search(String(query), { page: pageNumber, pageSize: limit });
-        const items = list.map(toProviderSong);
-        api.log.info(`[bodian] search "${query}" → ${items.length} 条`);
-        return { items, hasMore: items.length >= limit };
+        try {
+            // 库的 page 从 1 开始计数，而 Folia 给的是 offset
+            const list = await client.search(String(query), { page: toPageNumber(offset, limit), pageSize: limit });
+            const items = list.map(toProviderSongFromSearch);
+            api.log.info(`[bodian] search "${query}" offset=${offset} → ${items.length} 条`);
+            return { items, hasMore: items.length >= limit };
+        } catch (error) {
+            return failEmpty(`搜索 "${query}"`, error, { items: [], hasMore: false });
+        }
     });
 
     // ------------------------------------------------------------ 单曲详情
     api.rpc.handle('bodian.getSong', async (id) => {
-        const song = await client.getSongDetail(String(id));
-        return song ? toProviderSong(song) : null;
+        try {
+            const song = await client.getSongDetail(String(id));
+            return song ? toProviderSongFromSearch(song) : null;
+        } catch (error) {
+            // 队列 / 历史重开后靠它还原，取不到就返回 null（宿主会按缺详情处理）
+            logFailure(`单曲详情 ${id}`, error);
+            return null;
+        }
     });
 
     // ------------------------------------------------------------ 音频代理
@@ -279,7 +346,7 @@ module.exports = function activate(api) {
             return { url: proxied(result.url), expiresAt: Date.now() + URL_TTL_MS };
         } catch (error) {
             // 拿不到就返回 null，让宿主显示「无法播放」，不要把异常抛穿到界面
-            api.log.warn(`[bodian] getAudioUrl 失败 id=${id} 请求=${target}: ${error && error.message}`);
+            logFailure(`播放地址 ${id}（请求 ${target}）`, error);
             return null;
         }
     });
@@ -292,7 +359,7 @@ module.exports = function activate(api) {
             const result = await client.getLyrics(id);
             return { lrc: result.lrc };
         } catch (error) {
-            api.log.warn(`[bodian] getLyrics 失败 id=${id}: ${error && error.message}`);
+            logFailure(`歌词 ${id}`, error);
             return null;
         }
     });
@@ -306,34 +373,11 @@ module.exports = function activate(api) {
     // 收藏那份的 sourceType 是 6/13，其中带 albumId/artist 的其实是**专辑**而不是歌单，
     // 按用户要求过滤掉。
 
-    /**
-     * 曲目型列表（歌单曲目 / 专辑曲目 / 推荐流）→ FoliumProviderSong。
-     *
-     * 字段名按真实响应来（真机逐字段核对过，三处列表同构）：
-     *   id        歌曲 id（没有 rid 字段）
-     *   name      歌名
-     *   albumPic  封面（不是 pic/cover！之前映射错就导致列表全无封面）
-     *   artists   [{id,name,pic}]，artist 是它的 & 连接形式
-     *   duration  秒
-     */
-    const toProviderSongFromTrackList = (item) => {
-        const artists = Array.isArray(item.artists) && item.artists.length
-            ? item.artists.map((artist) => String(artist && artist.name ? artist.name : artist)).filter(Boolean)
-            : (item.artist ? String(item.artist).split('&').map((name) => name.trim()).filter(Boolean) : []);
-        return {
-            id: String(item.id || item.rid || item.musicRid || ''),
-            title: String(item.name || item.songName || item.title || ''),
-            artists,
-            ...(item.album ? { album: String(item.album) } : {}),
-            ...(item.albumPic || item.albumPic120 || item.pic || item.cover
-                ? { coverUrl: String(item.albumPic || item.albumPic120 || item.pic || item.cover) }
-                : {}),
-            ...(Number(item.duration) > 0 ? { durationMs: Math.round(Number(item.duration) * 1000) } : {}),
-        };
-    };
+    // 曲目型列表（歌单曲目 / 专辑曲目 / 推荐流）→ FoliumProviderSong 的映射在
+    // lib/mapping.cjs（纯函数、由 test/mapping.test.cjs 盯着字段名）。
 
     /**
-     * 自建 + 收藏合并后的列表。
+     * 自建 + 收藏合并后的列表（内部形状：带 source、**原始** id）。
      *
      * 缓存只服务翻页：宿主每次「刷新歌单」都从 offset=0 拉第一页（进首页时也会），
      * 所以把第一页当刷新信号，永远重打接口 —— 否则手机上刚改的歌单在缓存没过期前看不到。
@@ -354,23 +398,11 @@ module.exports = function activate(api) {
             const created = await signedGet('/api/service/playlist/userCreate', { userId: uid });
             const list = (created && created.data && created.data.playLists) || [];
             api.log.info(
-                `[bodian] userCreate uid=${uid} token=${auth.token ? auth.token.slice(0, 8) : '(空)'} ` +
-                `code=${created && created.code} 自建条数=${list.length}`
+                `[bodian] userCreate uid=${uid} token=${auth.token ? auth.token.slice(0, 8) : '(空)'} 自建条数=${list.length}`
             );
-            for (const playlist of list) {
-                items.push({
-                    id: String(playlist.id),
-                    name: String(playlist.name || ''),
-                    type: 'playlist',
-                    source: '5',
-                    coverUrl: String(playlist.pic || playlist.cover || ''),
-                    description: String(playlist.description || ''),
-                    trackCount: Number(playlist.musicCount || playlist.musicNum || 0) || 0,
-                    isOwned: true,
-                });
-            }
+            items.push(...list.map(toCollectionFromCreated));
         } catch (error) {
-            api.log.warn(`[bodian] 取「我创建的歌单」失败: ${error && error.message}`);
+            logFailure('取「我创建的歌单」', error);
         }
 
         try {
@@ -378,22 +410,10 @@ module.exports = function activate(api) {
                 userId: uid, fromUid: uid, pn: '1', rn: '200',
             });
             const list = (collected && collected.data && collected.data.playLists) || [];
-            for (const item of list) {
-                // 带 albumId/artist 的是专辑，不是歌单
-                if (item.albumId || item.artist || item.artistId) continue;
-                items.push({
-                    id: String(item.id),
-                    name: String(item.name || ''),
-                    type: 'playlist',
-                    source: String(item.sourceType || '4'),
-                    coverUrl: String(item.pic || item.cover || ''),
-                    description: String(item.description || ''),
-                    trackCount: Number(item.musicCount || item.musicNum || 0) || 0,
-                    isOwned: false,
-                });
-            }
+            // 真机数据：带 albumId 的条目是专辑（由 loadAlbums 那条路出），歌单条目没有这个字段
+            items.push(...list.filter((item) => !isCollectedAlbum(item)).map(toCollectionFromCollected));
         } catch (error) {
-            api.log.warn(`[bodian] 取「我收藏的歌单」失败: ${error && error.message}`);
+            logFailure('取「我收藏的歌单」', error);
         }
 
         collectionsCache = { at: now, items };
@@ -409,8 +429,13 @@ module.exports = function activate(api) {
         const all = await loadCollections({ force: offset === 0 });
         const slice = all.slice(offset, offset + limit);
         return {
-            // source 通过 providerData 带过去，供取曲目时用（收藏那份不是 5）
-            items: slice.map(({ source, ...rest }) => ({ ...rest, providerData: { source } })),
+            items: slice.map(({ source, ...rest }) => ({
+                // id 自带 source（p5_xxx）：点开时模组自己就能解释它，不依赖宿主回传 providerData
+                ...rest,
+                id: encodeCollectionId(source, rest.id),
+                // providerData 仍然带上 —— 宿主保留透传时作为交叉校验，没保留也不影响
+                providerData: { source },
+            })),
             hasMore: offset + slice.length < all.length,
             total: all.length,
         };
@@ -419,38 +444,50 @@ module.exports = function activate(api) {
     api.rpc.handle('bodian.library.getCollectionTracks', async (collectionId, page, providerData) => {
         const limit = Number(page && page.limit) > 0 ? Number(page.limit) : 100;
         const offset = Number(page && page.offset) > 0 ? Number(page.offset) : 0;
-        const pn = Math.floor(offset / limit) + 1; // 波点的 pn 从 1 开始
+        const pn = toPageNumber(offset, limit); // 波点的 pn 从 1 开始
 
-        // source 决定「这本目录是谁」：自建 5、收藏 4、平台歌单 13…
-        // 优先用宿主原样退回的 providerData（推荐歌单不在我们的缓存里，只能靠它）；
-        // 退回不了就在缓存里按 id 找，再找不到（缓存过期且没被拉过）强制刷一次缓存。
-        let source = providerData && providerData.source ? String(providerData.source) : '';
+        /**
+         * source 决定「这本目录是谁」：自建 5、收藏 4、平台歌单 13…
+         *
+         * 主路径是 id 自解释（`p13_7899404`）；旧数据（历史遗留的纯数字 id）走兜底：
+         * 宿主回传的 providerData → 缓存里按 id 找 → 默认自建歌单。
+         */
+        const decoded = decodeCollectionId(collectionId);
+        const upstreamId = decoded ? decoded.id : String(collectionId);
+        let source = decoded ? decoded.source : '';
+
+        if (!source && providerData && providerData.source) {
+            source = String(providerData.source);
+        }
         if (!source) {
             let all = await loadCollections();
-            let found = all.find((collection) => collection.id === String(collectionId));
+            let found = all.find((collection) => collection.id === upstreamId);
             if (!found) {
                 all = await loadCollections({ force: true });
-                found = all.find((collection) => collection.id === String(collectionId));
+                found = all.find((collection) => collection.id === upstreamId);
             }
             source = (found && found.source) || '5';
+            api.log.info(`[bodian] 歌单 ${upstreamId} 用旧 id 兜底 → source=${source}`);
         }
 
-        const response = await signedGet(`/api/service/playlist/${collectionId}/musicList`, {
-            source,
-            pn: String(pn),
-            rn: String(limit),
-        });
-        const data = (response && response.data) || {};
-        const list = data.list || data.musicList || data.resultList || data.songs || [];
-        const total = Number(data.total || list.length) || list.length;
-
-        const items = list.map(toProviderSongFromTrackList).filter((song) => song.id && song.title);
-
-        return {
-            items,
-            hasMore: offset + items.length < total,
-            total,
-        };
+        try {
+            const response = await signedGet(`/api/service/playlist/${upstreamId}/musicList`, {
+                source,
+                pn: String(pn),
+                rn: String(limit),
+            });
+            const { items, total } = pickSongList(response && response.data);
+            const songs = items.map(toProviderSongFromTrackList).filter((song) => song.id && song.title);
+            return {
+                items: songs,
+                hasMore: offset + songs.length < total,
+                total,
+            };
+        } catch (error) {
+            // 用户主动点开的列表：把错误抛给宿主，界面才会说「这条没打开」而不是显示空
+            logFailure(`歌单 ${upstreamId} 曲目`, error);
+            throw error;
+        }
     });
 
     // ------------------------------------------------------------ 我的专辑
@@ -471,21 +508,9 @@ module.exports = function activate(api) {
                 userId: auth.uid, fromUid: auth.uid, pn: '1', rn: '200',
             });
             const list = (collected && collected.data && collected.data.playLists) || [];
-            for (const item of list) {
-                // 只有带 albumId 的才是专辑；歌单那份没有这个字段
-                if (!item.albumId) continue;
-                items.push({
-                    id: String(item.albumId),
-                    name: String(item.name || ''),
-                    type: 'album',
-                    coverUrl: String(item.pic || item.cover || ''),
-                    description: String(item.artist || ''),
-                    trackCount: Number(item.musicCount || item.musicNum || 0) || 0,
-                    creatorName: String(item.artist || ''),
-                });
-            }
+            items.push(...list.filter(isCollectedAlbum).map(toAlbumFromCollected));
         } catch (error) {
-            api.log.warn(`[bodian] 取「我收藏的专辑」失败: ${error && error.message}`);
+            logFailure('取「我收藏的专辑」', error);
         }
 
         albumsCache = { at: now, items };
@@ -511,24 +536,25 @@ module.exports = function activate(api) {
     api.rpc.handle('bodian.library.getAlbumTracks', async (albumId, page) => {
         const limit = Number(page && page.limit) > 0 ? Number(page.limit) : 500;
         const offset = Number(page && page.offset) > 0 ? Number(page.offset) : 0;
-        const pn = Math.floor(offset / limit) + 1; // 与歌单一致：pn 从 1 开始
+        const pn = toPageNumber(offset, limit); // 与歌单一致：pn 从 1 开始
 
-        const response = await signedGet(`/api/service/album/music/${albumId}`, {
-            pn: String(pn),
-            rn: String(limit),
-        });
-        const data = (response && response.data) || {};
-        const list = data.resultList || data.list || data.musicList || [];
-        const total = Number(data.total || list.length) || list.length;
-
-        const items = list.map(toProviderSongFromTrackList).filter((song) => song.id && song.title);
-        api.log.info(`[bodian] 专辑曲目 ${albumId} pn=${pn} → ${items.length}/${total} 条`);
-
-        return {
-            items,
-            hasMore: offset + items.length < total,
-            total,
-        };
+        try {
+            const response = await signedGet(`/api/service/album/music/${albumId}`, {
+                pn: String(pn),
+                rn: String(limit),
+            });
+            const { items, total } = pickSongList(response && response.data);
+            const songs = items.map(toProviderSongFromTrackList).filter((song) => song.id && song.title);
+            api.log.info(`[bodian] 专辑曲目 ${albumId} pn=${pn} → ${songs.length}/${total} 条`);
+            return {
+                items: songs,
+                hasMore: offset + songs.length < total,
+                total,
+            };
+        } catch (error) {
+            // 专辑卡片点开失败：返回空表（列表类语义），日志里有 kind/code 可查
+            return failEmpty(`专辑曲目 ${albumId}`, error, { items: [], hasMore: false, total: 0 });
+        }
     });
 
     // ---------------------------------------------------------------- 电台
@@ -537,7 +563,7 @@ module.exports = function activate(api) {
     //   每日推荐  GET /api/service/home/module?moduleId=10    → data.musicList（心动收藏相似推荐）
     //   推荐歌单  GET /api/service/home/module?moduleId=2     → data.songList（宝藏歌单库，sourceType=13）
     //
-    // 推荐歌单是平台目录（不是「我的收藏」），点开时靠卡片上带的 providerData.source 回来取曲目。
+    // 推荐歌单的卡片 id 同样自带 source（p13_xxx），点开时不依赖宿主回传 providerData。
 
     api.rpc.handle('bodian.recommendations.getPersonalFm', async () => {
         try {
@@ -559,8 +585,7 @@ module.exports = function activate(api) {
             api.log.info(`[bodian] 私人 FM → ${items.length} 首`);
             return items;
         } catch (error) {
-            api.log.warn(`[bodian] 私人 FM 取数失败: ${error && error.message}`);
-            return [];
+            return failEmpty('私人 FM', error, []);
         }
     });
 
@@ -584,7 +609,7 @@ module.exports = function activate(api) {
                     return items;
                 }
             } catch (error) {
-                api.log.warn(`[bodian] 每日推荐 module=${moduleId} 失败: ${error && error.message}`);
+                logFailure(`每日推荐 module=${moduleId}`, error);
             }
         }
         api.log.warn('[bodian] 每日推荐：两个模块都没给歌');
@@ -599,22 +624,16 @@ module.exports = function activate(api) {
             const items = list
                 .filter((item) => item && item.id && item.name)
                 .slice(0, size)
-                .map((item) => ({
-                    id: String(item.id),
-                    name: String(item.name),
-                    type: 'playlist',
-                    ...(item.pic ? { coverUrl: String(item.pic) } : {}),
-                    // 简介里带 HTML 实体（&nbsp;），带进界面会显示成字面量
-                    ...(item.description ? { description: String(item.description).replace(/&nbsp;/g, ' ') } : {}),
-                    ...(Number(item.playNum) > 0 ? { playCount: Number(item.playNum) } : {}),
-                    // 平台目录的 sourceType（实测 13）；点开这张卡片时宿主会原样退回来
-                    providerData: { source: String(item.sourceType ?? 13) },
+                .map(toRecommendedCollection)
+                .map((collection) => ({
+                    ...collection,
+                    // 与歌单列表同样的约定：id 自带 source，点开时模组自己解释
+                    id: encodeCollectionId(collection.providerData.source, collection.id),
                 }));
             api.log.info(`[bodian] 推荐歌单 → ${items.length} 个`);
             return items;
         } catch (error) {
-            api.log.warn(`[bodian] 推荐歌单取数失败: ${error && error.message}`);
-            return [];
+            return failEmpty('推荐歌单', error, []);
         }
     });
 
@@ -632,7 +651,8 @@ module.exports = function activate(api) {
     api.rpc.handle('bodian.auth.getQrTtlMs', async () => QR_TTL_MS);
 
     api.rpc.handle('bodian.auth.getQrKey', async () => {
-        const response = await signedGet('/api/ucenter/login/qrCode');
+        // lenient：登录链路的"未扫码/未确认"状态可能伴随非 200 的信封值，收紧会破坏已验流程
+        const response = await signedGet('/api/ucenter/login/qrCode', {}, { lenient: true });
         const key = response && response.data && response.data.qrCode;
         if (!key) throw new Error(`波点未返回 qrCode: ${JSON.stringify(response).slice(0, 200)}`);
         api.log.info(`[bodian] 已创建扫码会话 key=${String(key).slice(0, 8)}…`);
@@ -648,10 +668,11 @@ module.exports = function activate(api) {
     api.rpc.handle('bodian.auth.checkQr', async (key) => {
         let status = 0;
         try {
-            const response = await signedGet('/api/ucenter/login/qrCodeStatus', { qrCode: String(key) });
+            const response = await signedGet('/api/ucenter/login/qrCodeStatus', { qrCode: String(key) }, { lenient: true });
             status = Number(response && response.data && response.data.status) || 0;
         } catch (error) {
-            return { state: 'error', message: `查询扫码状态失败: ${error && error.message}` };
+            const failure = logFailure('查询扫码状态', error);
+            return { state: 'error', message: `查询扫码状态失败: ${failure.message}` };
         }
 
         if (status === 2) return { state: 'scanned' };
@@ -682,7 +703,8 @@ module.exports = function activate(api) {
             api.log.info(`[bodian] 登录成功 uid=${uid} nickname=${currentUser.nickname} devid=${DEV_ID.slice(0, 8)}`);
             return { state: 'confirmed' };
         } catch (error) {
-            return { state: 'error', message: `换取登录凭据失败: ${error && error.message}` };
+            const failure = logFailure('换取登录凭据', error);
+            return { state: 'error', message: `换取登录凭据失败: ${failure.message}` };
         }
     });
 

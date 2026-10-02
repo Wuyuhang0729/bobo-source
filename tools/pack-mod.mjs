@@ -23,11 +23,46 @@ const OUT_DIR = path.join(REPO, 'tools', 'out');
 
 // 只带运行期需要的东西，其余（.bak / .log / 临时文件）一律不进包
 const INCLUDE_FILES = ['mod.json', 'index.cjs', 'client.mjs', 'NOTES.md'];
-const INCLUDE_DIRS = ['vendor', 'node_modules'];
+const INCLUDE_DIRS = ['lib', 'vendor', 'node_modules'];
 const EXCLUDED_SUFFIXES = ['.bak', '.log', '.tmp', '.orig'];
 // 这些子目录是纯包袱：qrcode 的 cli 依赖（yargs 全家桶）、pngjs 自带的覆盖率报告。
 // qrcode 的运行期入口只 require('./server') → pngjs，不碰 yargs（bin 才用）。
 const EXCLUDED_DIR_PREFIXES = ['node_modules/qrcode/node_modules/', 'node_modules/pngjs/coverage/'];
+
+// ── 分发前的敏感信息扫描 ────────────────────────────────────────────────
+// 模组会被打成 zip / 装进安装包发出去（甚至可能提给上游），而开发期的日志、临时脚本
+// 很容易把账号 token / uid 抄进注释或文档。这里在打包这一步挡住。
+// DEV_ID 是**故意写死**的设备标识（token 与它绑定，见 index.cjs 注释），不是凭据。
+const SENSITIVE_WHITELIST = ['aabbccddeeff00112233445566778899'];
+const SENSITIVE_RULES = [
+    { id: 'token-like-hex', description: '疑似 token（32 位十六进制）', pattern: /\b[0-9a-f]{32}\b/gi },
+    { id: 'uid-literal', description: '账号 uid 字面量', pattern: /\buid=\d{6,}/gi },
+    { id: 'token-assignment', description: 'token 赋值字面量', pattern: /["']?token["']?\s*[:=]\s*["'][^"']{12,}["']/gi },
+];
+
+const scanSensitive = (entries) => {
+    const findings = [];
+    for (const entry of entries) {
+        if (!/\.(cjs|mjs|js|json|md|txt)$/i.test(entry.relative)) continue;
+        // 第三方代码（node_modules / vendor）不扫：不是我们写的，也不含我们的凭据，
+        // 而且 pngjs 之类的位图数据会被 32 位十六进制规则误判。
+        if (entry.relative.startsWith('node_modules/') || entry.relative.startsWith('vendor/')) continue;
+        let text;
+        try {
+            text = fs.readFileSync(entry.full, 'utf8');
+        } catch {
+            continue;
+        }
+        for (const rule of SENSITIVE_RULES) {
+            const matches = text.match(rule.pattern) || [];
+            for (const match of matches) {
+                if (SENSITIVE_WHITELIST.some((allowed) => match.includes(allowed))) continue;
+                findings.push({ file: entry.relative, rule: rule.id, description: rule.description, sample: match.slice(0, 24) });
+            }
+        }
+    }
+    return findings;
+};
 
 const readManifest = () => {
   const manifestPath = path.join(MOD_SRC, 'mod.json');
@@ -84,6 +119,18 @@ const missing = REQUIRED_MODULES.filter((name) => !packed.has(`node_modules/${na
 if (missing.length) {
   console.error(`node_modules 里缺运行期依赖: ${missing.join(', ')}`);
   console.error('先把依赖同步进模组目录（从 folia/node_modules 复制）再打包。');
+  process.exit(1);
+}
+
+// 敏感信息扫描：挡在打包这一步，避免把账号凭据随 zip / 安装包发出去
+const allowSensitive = process.argv.includes('--allow-sensitive');
+const findings = scanSensitive(entries);
+if (findings.length && !allowSensitive) {
+  console.error(`发现 ${findings.length} 处疑似敏感信息，已中止打包：`);
+  for (const finding of findings) {
+    console.error(`  [${finding.rule}] ${finding.file}: ${finding.description} → ${finding.sample}…`);
+  }
+  console.error('确认无误后可用 `--allow-sensitive` 跳过（例如固定设备号这类有意写死的值）。');
   process.exit(1);
 }
 

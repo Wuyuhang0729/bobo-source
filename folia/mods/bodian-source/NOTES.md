@@ -110,11 +110,13 @@ stdout 有效就不会 EPIPE；顺带日志固定到 `tools\out\folia.log`，所
 
 1. **看模组列表**（设置 → 系统 → 模组）：出现 `duplicate mod id` 条目，或「该模组的文件在你上次
    确认之后发生了变化，已自动禁用」，就是这条问题。
-2. **三个扫描目录各查一遍同 id**（一个 id 只留一份）：
+2. **三个扫描目录各查一遍同 id**（一个 id 只留一份；把 `<仓库根>` 换成本机 checkout 路径，
+   本机是 `G:\BoDianBoFangQi`）：
    ```powershell
+   $repo = '<仓库根>'
    Get-ChildItem -Recurse -Filter mod.json `
-     G:\BoDianBoFangQi\folia\mods, "$env:APPDATA\Folia\mods", `
-     G:\BoDianBoFangQi\folia\node_modules\electron\dist\resources\mods |
+     "$repo\folia\mods", "$env:APPDATA\Folia\mods", `
+     "$repo\folia\node_modules\electron\dist\resources\mods" |
      ForEach-Object { "{0}: {1}" -f $_.FullName, ((Get-Content $_.FullName -Raw | ConvertFrom-Json).id) }
    ```
 3. **CDP 一条命令判断 provider 有没有注册上**（没有 `folium.*` 就是根本没加载）：
@@ -163,7 +165,6 @@ stdout 有效就不会 EPIPE；顺带日志固定到 `tools\out\folia.log`，所
 `folia-refresh-favorite-albums` 都会重新拉。
 
 ## 换机器 / 装成安装版（三条路）
-
 这个项目由两块组成，换机器时两块都要带：
 
 | 部分 | 在哪 | 怎么带 |
@@ -219,3 +220,38 @@ node tools/pack-mod.mjs      # → tools/out/bodian-source-<version>.zip
 
 把 zip 拖进「设置 → 系统 → 模组」面板，或解压到 `%APPDATA%\Folia\mods\bodian-source\` 后重启。
 **两种方式只选一种**：用户目录和仓库目录各留一份，就是上一节说的「重复 → 平台消失」。
+
+## 工程化工具与约定（出问题先跑 doctor）
+
+三个脚本，都在 `tools/`，零依赖：
+
+| 命令 | 用途 |
+|---|---|
+| `node tools/doctor.mjs` | 四级自检：vite(3000) → CDP 页面(9444) → provider 是否注册 → 模组 enabled / trustStale / 重复。失败项直接给下一步动作 |
+| `node tools/probe-bodian.mjs` | 端到端功能探针：搜索 / 私人 FM / 每日推荐 / 推荐歌单 / 我的歌单 / 专辑与曲目，逐项打条数与耗时。**不碰 token** —— 请求全走渲染进程的 omni，等价于在界面上点一下 |
+| `node tools/test-mod.mjs` | 模组单测（`node:test`）：字段映射、collection id 编解码、失败分类。上游一改字段这里先红，不用等用户发现列表没封面 |
+
+两条改模组时的约定：
+
+1. **纯逻辑放 `lib/`**：`lib/mapping.cjs`（响应 → 模型）、`lib/ids.cjs`（id 编解码）、
+   `lib/errors.cjs`（失败分类）；`index.cjs` 只留编排与网络。改字段回退或分页换算时，
+   先改 lib，再同步 `test/` 里的 fixture —— 那些断言就是字段名的合同。
+2. **失败日志带分类**：`logFailure` / `failEmpty` 统一输出
+   `kind=network|shape|rejected|unknown code=<码> msg=<文案>`。
+   - `rejected` + `code=-101` 多为签名 / devid 绑定 / token 失效（见上文 DEV_ID 那节）；
+   - `shape` 表示响应不是合法 JSON（上游形状变了，看 raw）；
+   - 列表类回调失败返回空表（不打断浏览），**点开的**曲目 / 播放地址 / 歌词照旧抛错或返回 null，
+     让界面能明确说「这条不行」。
+
+## collection id 的形状：`p<source>_<原始id>`
+
+自建 5 / 收藏 4 / 平台歌单 13 都编进 id（例：`p13_72245394`），点开时模组自己解码 ——
+**不再依赖宿主把 providerData 退回来**（那是本地补丁的一部分，上游不合并也不影响）。
+历史遗留的纯数字 id 仍然能开：走 `providerData → 本地缓存 → 默认 5` 的兜底，
+日志会打一行「歌单 xxx 用旧 id 兜底 → source=5」。实测两条路都通（推荐歌单 `p13_…` 与旧 id）。
+
+## 打包前会扫描敏感信息
+
+`node tools/pack-mod.mjs` 在打包这一步扫自有文件（跳过 `node_modules/` 与 `vendor/`）：
+疑似 token 的 32 位十六进制、`uid=<数字>`、`token` 赋值字面量 —— 命中即中止。
+唯一的白名单是 `DEV_ID`（有意写死的设备标识，不是凭据）。要跳过用 `--allow-sensitive`。

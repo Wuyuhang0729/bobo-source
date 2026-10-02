@@ -14,9 +14,6 @@
 // 保留 USE_FAKE 开关：置 true 可退回假数据，用于排查「是链路问题还是接口问题」。
 const USE_FAKE = false;
 
-/** provider 回调里所有网络动作都走 main，这里只是转发。 */
-const call = (name, ...args) => folium.rpc.call(`bodian.${name}`, ...args);
-
 /** S1 假数据：用来确认链路通，字段形状与真实 provider 完全一致。 */
 const FAKE_SONGS = [
   { id: 'fake-1', title: '晴天（S1 假数据）', artists: ['周杰伦'], album: '叶惠美', durationMs: 269000 },
@@ -25,6 +22,11 @@ const FAKE_SONGS = [
 
 export default function activate(folium) {
   folium.log.info('[bodian] client 入口激活，开始注册 omni provider');
+
+  // provider 回调里所有网络动作都走 main，这里只是转发。
+  // 必须定义在 activate 内部：folium 是它的参数，模块作用域里不存在这个变量
+  // （放外面会抛 ReferenceError: folium is not defined）。
+  const call = (name, ...args) => folium.rpc.call(`bodian.${name}`, ...args);
 
   const handle = folium.experimental['omni.providers'].register({
     id: 'bodian',
@@ -67,6 +69,46 @@ export default function activate(folium) {
         };
       }
       return call('getLyrics', song);
+    },
+
+    // ---- 账号：扫码登录（全部实现在 main，这里只转发）
+    //
+    // 不实现 getQrLoginMethods：宿主据此走「单步流程」——直接出二维码，没有登录方式选择。
+    // 注意 getQrTtlMs 必须是同步返回的普通数字（宿主直接调用取值），所以不能走 rpc。
+    auth: {
+      getLoginStatus: () => call('auth.getStatus'),
+      logout: () => call('auth.logout'),
+      getQrKey: () => call('auth.getQrKey'),
+      createQr: (key) => call('auth.createQr', key),
+      checkQr: (key) => call('auth.checkQr', key),
+      cancelQr: (key) => call('auth.cancelQr', key),
+      getQrTtlMs: () => 3 * 60 * 1000,
+    },
+
+    // ---- 我的歌单（自建 + 收藏；实现在 main，这里只转发）
+    //
+    // 声明了它才会点亮宿主的「歌单」tab。这一步很关键：搜索是跟着当前 tab 走的
+    // （isOnlineTab ? activeProviderId : …），tab 被禁用就永远搜不到波点的歌。
+    library: {
+      getUserCollections: (userId, page) => call('library.getCollections', userId, page),
+      // providerData 是列表时我们自己塞进去的 providerData（含 source），点开歌单时原样退回
+      getCollectionTracks: (collectionId, page, providerData) =>
+        call('library.getCollectionTracks', collectionId, page, providerData ?? null),
+      // 声明它才会点亮「专辑」tab（宿主判的是 userLibrary && userAlbums）
+      getUserAlbums: (userId, page) => call('library.getAlbums', userId, page),
+      // 专辑卡片点开时取曲目：宿主的 catalog 对 type==='album' 只问 getAlbumTracks，
+      // 少了这一步，专辑能列出来但点进去是空的
+      getAlbumTracks: (albumId, page) => call('library.getAlbumTracks', albumId, page),
+    },
+
+    // ---- 电台（私人 FM / 每日推荐 / 推荐歌单）
+    //
+    // 声明了它才会点亮宿主的「电台」tab（宿主判的是 capabilities.recommendations）。
+    // 三张卡片各自独立：宿主把私人 FM 与每日推荐摊成歌，把推荐歌单摊成可点开的卡片。
+    recommendations: {
+      getPersonalFm: () => call('recommendations.getPersonalFm'),
+      getDailySongs: (refresh) => call('recommendations.getDailySongs', Boolean(refresh)),
+      getRecommendedCollections: (limit) => call('recommendations.getRecommendedCollections', limit),
     },
   });
 

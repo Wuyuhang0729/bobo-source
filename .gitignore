@@ -22,3 +22,6 @@ folia/mods/*
 # 模组内 vendored 的 bodian 库由 tools/sync-bodian-vendor.mjs 从 any-listen/dist
 # 生成，不重复入库（换了机器先跑一次该脚本）。
 folia/mods/bodian-source/vendor/
+
+# 模组打包产物（tools/pack-mod.mjs 生成的可拖入安装 zip）
+tools/out/

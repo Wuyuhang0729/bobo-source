@@ -1,0 +1,620 @@
+From c01f15d81432a5033778f08aa6ab23f08bf8fce0 Mon Sep 17 00:00:00 2001
+From: Winter wuyuhang <155148127+2075689219@users.noreply.github.com>
+Date: Fri, 2 Oct 2026 14:50:39 +0800
+Subject: [PATCH] =?UTF-8?q?feat(mods):=20=E6=A8=A1=E7=BB=84=E9=9F=B3?=
+ =?UTF-8?q?=E6=BA=90=E7=9A=84=E6=9C=AC=E5=9C=B0=E6=89=A9=E5=B1=95=20?=
+ =?UTF-8?q?=E2=80=94=E2=80=94=20=E7=99=BB=E5=BD=95=20/=20=E6=AD=8C?=
+ =?UTF-8?q?=E5=8D=95=20/=20=E4=B8=93=E8=BE=91=20/=20=E7=94=B5=E5=8F=B0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+上游把模组 provider 的 auth / userLibrary / playlists / userAlbums / recommendations
+一律写死为 false，于是自写的音源在界面里只剩搜索和播放：没有登录入口，没有歌单 / 专辑 /
+电台标签（而搜索又是跟着 tab 走的 —— tab 禁用就永远搜不到这个源）。
+
+本分支（本地自用）把这些补齐，全部标了 LOCAL CHANGE (bodian-source)：
+
+- contract.ts
+  * FoliumOmniProviderLibrary.getAlbumTracks：宿主 catalog 对 type==='album' 只问它
+  * getCollectionTracks 增加 providerData 回传、collection 增加 providerData 透传
+  * 新增 FoliumOmniProviderRecommendations 与 def.recommendations（电台 tab 的开关）
+- registries/omniProviders.ts：把上面对接到宿主能力表与适配器
+- hooks：模组 provider 不在内置 refresher 表里，补通用兜底，
+  否则账号状态永远 resolving、歌单永不刷新
+- Grid3D.tsx / i18n：登录弹窗按 provider 全名取文案
+  （folium.<modid>.<providerId>，写成 folium.bodian 会静默回退网易云文案）
+- package.json：extraResources 带上 mods/bodian-source，
+  安装版开箱即有此音源（在设置 → 系统 → 模组里确认启用一次）
+
+配套模组代码在仓库 folia/mods/bodian-source（根仓库跟踪），
+换机重放用 tools/folia-local-changes.patch。
+---
+ package.json                                |   7 +
+ src/components/Grid3D.tsx                   |   5 +
+ src/hooks/useHomeProviderRefresh.ts         |   7 +
+ src/hooks/useOnlineProviderPlatform.ts      |  77 ++++++++--
+ src/i18n/locales/en.ts                      |   2 +
+ src/i18n/locales/in.ts                      |   2 +
+ src/i18n/locales/zh-CN.ts                   |   2 +
+ src/mods/folium/contract.ts                 | 139 ++++++++++++++++++
+ src/mods/folium/registries/omniProviders.ts | 152 ++++++++++++++++++--
+ 9 files changed, 376 insertions(+), 17 deletions(-)
+
+diff --git a/package.json b/package.json
+index c9b5d4e..333f45d 100644
+--- a/package.json
++++ b/package.json
+@@ -96,6 +96,13 @@
+         "from": "build/ffmpeg/${os}-${arch}",
+         "to": "ffmpeg-audio"
+       },
++      {
++        "from": "mods",
++        "to": "mods",
++        "filter": [
++          "bodian-source/**/*"
++        ]
++      },
+       {
+         "from": "build/icon.png",
+         "to": "icon.png"
+diff --git a/src/components/Grid3D.tsx b/src/components/Grid3D.tsx
+index b733539..236db9c 100644
+--- a/src/components/Grid3D.tsx
++++ b/src/components/Grid3D.tsx
+@@ -41,9 +41,14 @@ import { countRender } from '../dev/renderCount';
+ // Supports cover sliding with auto-fading header controls and delegates GridView opening upward.
+ 
+ // Each provider scans from its own app, so the modal copy is keyed here instead of nested in the JSX.
++// Mod-provided sources are hosted under `folium.<modid>.<providerId>` (foliumProviderId() in
++// folium/registries/omniProviders.ts) — for the bodian-source mod that key is
++// `folium.bodian-source.bodian`. NOTE: the runtime providerId is only used for indexing; the bare
++// `folium.bodian` will NOT match and silently falls back to NETEASE_LOGIN_COPY.
+ const LOGIN_COPY_BY_PROVIDER: Record<string, { title: string; note: string }> = {
+     kugou: { title: 'home.loginTitleKugou', note: 'home.loginNoteKugou' },
+     qq: { title: 'home.loginTitleQq', note: 'home.loginNoteQq' },
++    'folium.bodian-source.bodian': { title: 'home.loginTitleBodian', note: 'home.loginNoteBodian' },
+ };
+ const NETEASE_LOGIN_COPY = { title: 'home.loginTitle', note: 'home.loginNote' };
+ 
+diff --git a/src/hooks/useHomeProviderRefresh.ts b/src/hooks/useHomeProviderRefresh.ts
+index b3cdda6..8d7a4ae 100644
+--- a/src/hooks/useHomeProviderRefresh.ts
++++ b/src/hooks/useHomeProviderRefresh.ts
+@@ -40,6 +40,12 @@ export const useHomeProviderRefresh = ({
+         if (currentView !== 'home' || hasCollection) return;
+ 
+         const providerId = onlineProviderPlatform.activeProviderId;
++        // 账号还没 hydrate 完就先不动：refreshProviderPlaylists 读的是 account.user.id，
++        // 账号为空时它会立刻 return []，歌单就永远拉不回来。
++        //
++        // 对内置平台这条从来不是问题——各自的 useXxxLibrary hook 会在挂载时先把账号填好；
++        // 模组 provider 的账号是异步查出来的，于是和这里形成了竞态，必须显式等一次。
++        if (!onlineProviderPlatform.activeProvider?.user) return;
+         const startedAt = Date.now();
+         const previous = lastHomeProviderRefreshRef.current;
+         if (previous?.providerId === providerId && startedAt - previous.at <= HOME_PROVIDER_REFRESH_COOLDOWN_MS) return;
+@@ -72,6 +78,7 @@ export const useHomeProviderRefresh = ({
+         currentView,
+         hasCollection,
+         onlineProviderPlatform.activeProvider?.freshness,
++        onlineProviderPlatform.activeProvider?.user,
+         onlineProviderPlatform.activeProviderId,
+         refreshActiveProviderPlaylists,
+         t,
+diff --git a/src/hooks/useOnlineProviderPlatform.ts b/src/hooks/useOnlineProviderPlatform.ts
+index b038c58..858ed33 100644
+--- a/src/hooks/useOnlineProviderPlatform.ts
++++ b/src/hooks/useOnlineProviderPlatform.ts
+@@ -1,7 +1,7 @@
+ import { useCallback, useEffect, useMemo } from 'react';
+ import { useShallow } from 'zustand/react/shallow';
+ import { omni } from '../services/onlineMusic/omni';
+-import { useOnlineProviderAccountStore } from '../stores/useOnlineProviderAccountStore';
++import { useOnlineProviderAccountStore, type OnlineProviderAccountState } from '../stores/useOnlineProviderAccountStore';
+ import type { OnlineProviderId, ProviderAccountSummary } from '../types/onlineMusic';
+ import { useStableCallbacks } from './useStableCallbacks';
+ 
+@@ -84,30 +84,91 @@ export const useOnlineProviderPlatform = (
+     useEffect(() => {
+         if (storedProviderId !== activeProviderId) setActiveProviderId(activeProviderId);
+     }, [activeProviderId, setActiveProviderId, storedProviderId]);
+-    const refreshProvider = useCallback(async (providerId: OnlineProviderId) => {
+-        return await refreshers[providerId]?.();
++    /**
++     * 刷新一个 provider 的账号状态。
++     *
++     * 内置平台（netease / kugou / qq）各有自己的 refresher，写在 App.tsx 的那张表里；
++     * **模组音源不在那张表里**，所以表里查不到时回落到 omni 的通用登录态查询。
++     *
++     * 没有这一步，模组 provider 的 account 会永远停在 status='unknown' /
++     * hydration='loading'，而 resolveOnlineProviderAccountView 把这两个值判成
++     * 'resolving' —— 界面表现就是「一直转圈」且「显示未登录」。
++     */
++    const refreshProviderAccount = useCallback(async (providerId: OnlineProviderId) => {
++        const refresher = refreshers[providerId];
++        if (refresher) return await refresher();
++
++        const { updateAccount } = useOnlineProviderAccountStore.getState();
++        const settle = (patch: Partial<OnlineProviderAccountState>) => updateAccount(providerId, {
++            hydration: 'ready',
++            freshness: 'fresh',
++            ...patch,
++        });
++
++        try {
++            const user = await omni.getLoginStatus(providerId);
++            settle(user
++                ? { status: 'authenticated', user }
++                : { status: 'anonymous', user: null, collections: [] });
++            return user ?? null;
++        } catch {
++            // provider 没有 auth 能力时 omni 抛 unsupported：按「匿名已就绪」处理，
++            // 让它显示成可搜索/可播放的游客态，而不是永远卡在 resolving。
++            settle({ status: 'anonymous', user: null, collections: [] });
++            return null;
++        }
+     }, [refreshers]);
++    /**
++     * 挂载时、以及切换平台时，都刷新一次它的账号状态。
++     *
++     * 内置平台各有自己的 useXxxLibrary hook 在挂载时完成这件事；模组 provider 没有 hook，
++     * 不在这里兜底的话它的 account 会一直是空的 —— 界面上表现为「未登录」，歌单也拉不出来
++     * （refreshProviderPlaylists 先读 account.user.id，拿不到就直接 return []）。
++     */
++    useEffect(() => {
++        void refreshProviderAccount(activeProviderId);
++    }, [activeProviderId, refreshProviderAccount]);
++    const refreshProvider = useCallback(async (providerId: OnlineProviderId) => {
++        return await refreshProviderAccount(providerId);
++    }, [refreshProviderAccount]);
+     const logoutProvider = useCallback(async (providerId: OnlineProviderId) => {
+-        await logouts[providerId]?.();
++        const logout = logouts[providerId];
++        if (logout) {
++            await logout();
++            return;
++        }
++        // 通用兜底：模组 provider 不在内置表里，直接问它的 auth 门面，再把账号状态落到 store。
++        try {
++            await omni.logout(providerId);
++        } catch {
++            // provider 没有 auth 能力时 omni 会抛 unsupported；退出到匿名即可。
++        }
++        useOnlineProviderAccountStore.getState().updateAccount(providerId, {
++            status: 'anonymous',
++            user: null,
++            collections: [],
++            hydration: 'ready',
++            freshness: 'fresh',
++        });
+     }, [logouts]);
+     const switchProvider = useCallback((providerId: OnlineProviderId) => switchOnlineProviderTransaction({
+         currentProviderId: activeProviderId,
+         nextProviderId: providerId,
+         prepare: prepareSwitch,
+         commit: setActiveProviderId,
+-        refresh: refreshers[providerId],
+-    }), [activeProviderId, prepareSwitch, refreshers, setActiveProviderId]);
++        refresh: () => refreshProviderAccount(providerId),
++    }), [activeProviderId, prepareSwitch, refreshProviderAccount, setActiveProviderId]);
+     const completeLogin = useCallback((providerId: OnlineProviderId) => completeOnlineProviderLoginTransaction({
+         currentProviderId: activeProviderId,
+         loginProviderId: providerId,
+-        refresh: async () => await refreshers[providerId]?.(),
++        refresh: async () => await refreshProviderAccount(providerId),
+         activate: () => switchOnlineProviderTransaction({
+             currentProviderId: activeProviderId,
+             nextProviderId: providerId,
+             prepare: prepareSwitch,
+             commit: setActiveProviderId,
+         }),
+-    }), [activeProviderId, prepareSwitch, refreshers, setActiveProviderId]);
++    }), [activeProviderId, prepareSwitch, refreshProviderAccount, setActiveProviderId]);
+ 
+     const activeProvider = providers.find(provider => provider.providerId === activeProviderId) || providers[0];
+     // The whole object is a dependency of buildHomeModel, so unlike the other hooks here it is not
+diff --git a/src/i18n/locales/en.ts b/src/i18n/locales/en.ts
+index a53c7f7..f3de2dd 100644
+--- a/src/i18n/locales/en.ts
++++ b/src/i18n/locales/en.ts
+@@ -1014,6 +1014,8 @@ export default {
+     "loginNote": "Open Netease Music App > Discover > Scan QR",
+     "loginTitleKugou": "Scan with KuGou Music",
+     "loginNoteKugou": "Open KuGou Music and scan this QR code",
++    "loginTitleBodian": "Scan with Bodian Music",
++    "loginNoteBodian": "Open Bodian Music and use its scanner to sign in",
+     "loginTitleQq": "Scan to sign in to QQ Music",
+     "loginNoteQq": "Choose the sign-in method matching your account: QQ scan or WeChat scan",
+     "qqLoginMethodTitle": "Choose sign-in method",
+diff --git a/src/i18n/locales/in.ts b/src/i18n/locales/in.ts
+index b19fc96..b645eda 100644
+--- a/src/i18n/locales/in.ts
++++ b/src/i18n/locales/in.ts
+@@ -1009,6 +1009,8 @@ export default {
+     "loginNote": "Buka Aplikasi Netease Music > Discover > Pindai QR",
+     "loginTitleKugou": "Pindai dengan KuGou Music",
+     "loginNoteKugou": "Buka KuGou Music dan pindai kode QR ini",
++    "loginTitleBodian": "Pindai dengan Bodian Music",
++    "loginNoteBodian": "Buka Bodian Music dan gunakan pemindainya untuk masuk",
+     "loginTitleQq": "Pindai untuk masuk ke QQ Music",
+     "loginNoteQq": "Pilih metode masuk yang sesuai: pindai QQ atau pindai WeChat",
+     "qqLoginMethodTitle": "Pilih metode masuk",
+diff --git a/src/i18n/locales/zh-CN.ts b/src/i18n/locales/zh-CN.ts
+index ce9e5b2..894ce9c 100644
+--- a/src/i18n/locales/zh-CN.ts
++++ b/src/i18n/locales/zh-CN.ts
+@@ -1013,6 +1013,8 @@ export default {
+     "loginNote": "打开网易云音乐APP > 发现 > 扫一扫",
+     "loginTitleKugou": "使用酷狗音乐APP扫码",
+     "loginNoteKugou": "打开酷狗音乐APP扫描二维码",
++    "loginTitleBodian": "使用波点音乐APP扫码",
++    "loginNoteBodian": "打开波点音乐APP，用扫一扫登录",
+     "loginTitleQq": "扫码登录QQ音乐",
+     "loginNoteQq": "请选择与账号一致的登录方式：QQ 扫码或微信扫码",
+     "qqLoginMethodTitle": "选择登录方式",
+diff --git a/src/mods/folium/contract.ts b/src/mods/folium/contract.ts
+index 2bb7355..174c0a6 100644
+--- a/src/mods/folium/contract.ts
++++ b/src/mods/folium/contract.ts
+@@ -1007,6 +1007,139 @@ export interface FoliumProviderSong {
+ /** Audio quality levels an Omni provider may be asked for. */
+ export type FoliumAudioQuality = 'standard' | 'high' | 'lossless' | 'hires';
+ 
++/**
++ * EXPERIMENTAL (`omni.providers`): the signed-in account as Folium shows it.
++ * `id` is the provider's own user id; keep it stable across logins.
++ */
++export interface FoliumProviderUser {
++    id: string;
++    nickname: string;
++    avatarUrl?: string;
++    backgroundUrl?: string;
++    vipType?: number;
++}
++
++/** EXPERIMENTAL (`omni.providers`): what polling one QR session reports. */
++export type FoliumProviderQrState =
++    | { state: 'waiting' }
++    | { state: 'scanned' }
++    | { state: 'confirmed' }
++    | { state: 'expired' }
++    | { state: 'error'; message?: string };
++
++/**
++ * EXPERIMENTAL (`omni.providers`): account login for a mod provider.
++ *
++ * The host drives a provider-neutral QR flow: `getQrKey()` → `createQr(key)` → poll
++ * `checkQr(key)` until it leaves `waiting`. Return the QR however you like — an https URL
++ * (the host points an <img> at it) or a `data:` URL work equally well.
++ *
++ * Omit `getQrLoginMethods` for a single-step flow (one QR, no method picker), which is what
++ * a provider with a single scan target wants.
++ */
++export interface FoliumOmniProviderAuth {
++    getLoginStatus(): Promise<FoliumProviderUser | null>;
++    logout(): Promise<void>;
++    /** A new session key, opaque to the host. */
++    getQrKey?(): Promise<string>;
++    /** The QR image to show for that key. */
++    createQr?(key: string): Promise<string>;
++    checkQr?(key: string): Promise<FoliumProviderQrState>;
++    /** Must be idempotent: the host calls it fire-and-forget when the modal closes. */
++    cancelQr?(key: string): Promise<void>;
++    /** Declare it and the host times the QR itself; omit to only trust reported expiry. */
++    getQrTtlMs?(): number;
++}
++
++/**
++ * EXPERIMENTAL (`omni.providers`): one collection (playlist / album / radio) a provider exposes.
++ * `type` is free-form; the host routes unknown types to its playlist views.
++ */
++export interface FoliumProviderCollection {
++    /** Collection id within this provider. */
++    id: string;
++    /** Display name. */
++    name: string;
++    /** `playlist` | `album` | `radio` | … Defaults to `playlist`. */
++    type?: string;
++    /** Cover image URL. */
++    coverUrl?: string;
++    /** Shown under the name. */
++    description?: string;
++    /** Track count, when known. */
++    trackCount?: number;
++    /** Play count, when known. */
++    playCount?: number;
++    /** Created by the signed-in user (as opposed to merely collected). */
++    isOwned?: boolean;
++    /** Creator display name. */
++    creatorName?: string;
++    /**
++     * Opaque per-provider extras, forwarded to the host collection untouched.
++     *
++     * LOCAL CHANGE (bodian-source): the mod needs this to remember which upstream catalog an id
++     * came from — Bodian's playlists live behind `source` values that are not derivable from the
++     * id alone, so `getCollectionTracks` has to read it back when a collection is opened.
++     */
++    providerData?: Record<string, unknown>;
++}
++
++/**
++ * EXPERIMENTAL (`omni.providers`): the signed-in user's library.
++ *
++ * Declaring this is what lights up the host's 歌单/专辑 tabs for a mod provider. Without it
++ * `capabilities.userLibrary` stays false, those tabs render disabled — and since search follows
++ * the active tab, search would never route to this provider either. Pages are offset-based.
++ */
++export interface FoliumOmniProviderLibrary {
++    /** The user's collections (own + collected). */
++    getUserCollections(userId: string, page: { limit: number; offset: number }):
++        Promise<{ items: FoliumProviderCollection[]; hasMore: boolean; total?: number }>;
++    /**
++     * Tracks inside one collection; omit to make collections non-openable.
++     *
++     * LOCAL CHANGE (bodian-source): `providerData` hands back whatever the mod attached to the
++     * collection it listed (see FoliumProviderCollection.providerData), because some upstreams need
++     * more than the id to resolve a track page.
++     */
++    getCollectionTracks?(collectionId: string, page: { limit: number; offset: number }, providerData?: Record<string, unknown>):
++        Promise<{ items: FoliumProviderSong[]; hasMore: boolean; total?: number }>;
++    /**
++     * The user's collected albums. Declaring it sets `capabilities.userAlbums`, which is what the
++     * host's 专辑 tab checks (together with userLibrary). Omit and that tab stays disabled.
++     */
++    getUserAlbums?(userId: string, page: { limit: number; offset: number }):
++        Promise<{ items: FoliumProviderCollection[]; hasMore: boolean; total?: number }>;
++    /**
++     * Tracks of one album from `getUserAlbums`.
++     *
++     * LOCAL CHANGE (bodian-source): upstream routed every collection through `getCollectionTracks`,
++     * but the host asks `catalog.getAlbumTracks` for `type: 'album'` collections — without this
++     * member an album card opened to an empty grid. Omit and albums stay non-openable.
++     */
++    getAlbumTracks?(albumId: string, page: { limit: number; offset: number }):
++        Promise<{ items: FoliumProviderSong[]; hasMore: boolean; total?: number }>;
++}
++
++/**
++ * EXPERIMENTAL (`omni.providers`): recommendations for a mod provider.
++ *
++ * Declaring any member lights up the host's 电台 tab (it checks `capabilities.recommendations`),
++ * which renders one card for personal FM, one for the daily list and one per recommended
++ * collection. Members the mod leaves out simply yield empty cards.
++ *
++ * LOCAL CHANGE (bodian-source): the contract had no recommendations member at all, so a mod
++ * provider's 电台 tab could never leave its disabled state.
++ */
++export interface FoliumOmniProviderRecommendations {
++    /** Personal FM: fresh tracks for the FM queue. */
++    getPersonalFm?(): Promise<FoliumProviderSong[]>;
++    /** Daily recommendations. `refresh` asks for a new draw of the same list. */
++    getDailySongs?(refresh?: boolean): Promise<FoliumProviderSong[]>;
++    /** Recommended collections (playlists etc) shown alongside the two fixed cards. */
++    getRecommendedCollections?(limit: number): Promise<FoliumProviderCollection[]>;
++}
++
+ /**
+  * EXPERIMENTAL (`omni.providers`): an online music source. The host adapts it
+  * to its provider contract; songs from it play, queue and show lyrics like any
+@@ -1027,6 +1160,12 @@ export interface FoliumOmniProviderDef {
+     getAudioUrl?(song: FoliumProviderSong, quality: FoliumAudioQuality): Promise<{ url: string; expiresAt?: number } | null>;
+     /** LRC text (plus optional translation LRC); the host parses it. */
+     getLyrics?(song: FoliumProviderSong): Promise<{ lrc: string; translationLrc?: string } | null>;
++    /** Account login. Omit to make the provider anonymous-only. */
++    auth?: FoliumOmniProviderAuth;
++    /** The user's library (playlists etc). Omit to leave the host's library tabs disabled. */
++    library?: FoliumOmniProviderLibrary;
++    /** Recommendations (personal FM / daily list / recommended collections). Omit to leave 电台 off. */
++    recommendations?: FoliumOmniProviderRecommendations;
+ }
+ 
+ // ---------------------------------------------------------------- Shared helpers
+diff --git a/src/mods/folium/registries/omniProviders.ts b/src/mods/folium/registries/omniProviders.ts
+index 297f43b..3e2ed25 100644
+--- a/src/mods/folium/registries/omniProviders.ts
++++ b/src/mods/folium/registries/omniProviders.ts
+@@ -1,24 +1,33 @@
+ import type { SongResult, UnifiedSong } from '@/types';
+-import type { AudioQualityPreference, OnlineMusicProvider, ProviderCapabilities } from '@/types/onlineMusic';
++import type { AudioQualityPreference, OnlineMusicProvider, ProviderCapabilities, ProviderCollection } from '@/types/onlineMusic';
+ import {
+     getOnlineMusicProvider,
+     registerOnlineMusicProvider,
+     unregisterOnlineMusicProvider,
+ } from '@/services/onlineMusic/providerRegistry';
+ import { parseLRC } from '@/utils/lyrics/parserCore';
+-import type { FoliumOmniProviderDef, FoliumProviderSong } from '../contract';
++import type { FoliumOmniProviderDef, FoliumProviderCollection, FoliumProviderSong } from '../contract';
+ import { createFoliumRegistry } from '../registry';
+ 
+ // src/mods/folium/registries/omniProviders.ts
+ // EXPERIMENTAL `omni.providers`: a mod's online music source, adapted to the
+ // host OnlineMusicProvider contract so Omni routes to it like to any built-in
+-// provider (search, playback, lyrics; nothing account-related). Host provider
++// provider (search, playback, lyrics; plus, when the mod declares `auth`, the
++// same provider-neutral QR login flow the built-ins use). Host provider
+ // id is `folium.<modid>.<name>`: dots, because ':' already carries meaning in
+ // other host ids, and a dot can never collide with a built-in provider id.
+ //
+ // Songs keep the mod's own id as `sourceRef.mediaId`, so queues and history
+ // that outlive the mod still name the song; they become unplayable, not
+ // corrupt, while the mod is off.
++//
++// LOCAL CHANGE (bodian-source), all experimental-interface gaps upstream left closed:
++//   1. `auth`    — the host QR flow reads `provider.auth`; without it a mod provider
++//                  could never offer login and bailed out with `unsupported`.
++//   2. `library` — `capabilities.userLibrary`/`playlists` were hardcoded false, so the
++//                  host's 歌单/专辑 tabs stayed disabled for mod providers. Since search
++//                  follows the active tab, that also made the provider unsearchable.
++// Both contract types already existed; this file now forwards them.
+ 
+ export const foliumProviderId = (id: string) => `folium.${id.replace(':', '.')}`;
+ 
+@@ -47,17 +56,42 @@ const isProviderSong = (value: unknown): value is FoliumProviderSong => (
+     Boolean(value) && typeof (value as FoliumProviderSong).id === 'string' && typeof (value as FoliumProviderSong).title === 'string'
+ );
+ 
++const toProviderCollection = (providerId: string, collection: FoliumProviderCollection): ProviderCollection => ({
++    providerId,
++    id: collection.id,
++    name: collection.name,
++    type: collection.type || 'playlist',
++    ...(collection.coverUrl ? { coverUrl: collection.coverUrl } : {}),
++    ...(collection.description ? { description: collection.description } : {}),
++    ...(Number.isFinite(collection.trackCount) ? { trackCount: Number(collection.trackCount) } : {}),
++    ...(Number.isFinite(collection.playCount) ? { playCount: Number(collection.playCount) } : {}),
++    ...(collection.isOwned ? { isOwned: true } : {}),
++    // 宿主用 creator.nickname 显示作者；只给 description 会显示成「未知歌手」
++    ...(collection.creatorName ? { creator: { id: collection.id, nickname: collection.creatorName } } : {}),
++    // 原样透传：模组靠它把「这个 id 属于哪本上游目录」带到打开收藏那一刻
++    ...(collection.providerData ? { providerData: collection.providerData as ProviderCollection['providerData'] } : {}),
++});
++
+ const buildProvider = (providerId: string, def: FoliumOmniProviderDef): OnlineMusicProvider => {
+     const capabilities: ProviderCapabilities = {
+         search: typeof def.search === 'function',
+         playback: typeof def.getAudioUrl === 'function',
+         lyrics: typeof def.getLyrics === 'function',
+-        auth: false,
+-        userLibrary: false,
+-        playlists: false,
++        // "auth" means the host may ask who is signed in and sign out. A mod that only attaches a
++        // token internally should leave `auth` out and stay anonymous to the host.
++        auth: typeof def.auth?.getLoginStatus === 'function' && typeof def.auth?.logout === 'function',
++        // A library means "I can list the signed-in user's playlists"; the host gates its
++        // 歌单 tab on userLibrary + playlists, and its 专辑 tab on userLibrary + userAlbums.
++        userLibrary: typeof def.library?.getUserCollections === 'function',
++        playlists: typeof def.library?.getUserCollections === 'function',
++        // 专辑 tab 的开关：只有模组实现了 getUserAlbums 才点亮
++        userAlbums: typeof def.library?.getUserAlbums === 'function',
+         albums: false,
+         artists: false,
+-        recommendations: false,
++        // 电台 tab 的开关：任一推荐取数口实现即可点亮（没实现的那几张卡片是空的）
++        recommendations: typeof def.recommendations?.getPersonalFm === 'function'
++            || typeof def.recommendations?.getDailySongs === 'function'
++            || typeof def.recommendations?.getRecommendedCollections === 'function',
+         mutations: false,
+         wordByWordLyrics: false,
+     };
+@@ -120,13 +154,113 @@ const buildProvider = (providerId: string, def: FoliumOmniProviderDef): OnlineMu
+                 },
+             },
+         } : {}),
++        // A mod-declared `auth` is adapted 1:1 onto the host's OnlineAuthProvider. Optional
++        // members are forwarded only when the mod implements them, so the host keeps its own
++        // defaults (single-step QR without getQrLoginMethods, no self-timed TTL without
++        // getQrTtlMs) exactly as it does for built-in providers.
++        ...(capabilities.auth && def.auth ? {
++            auth: {
++                getLoginStatus: async () => {
++                    const user = await def.auth!.getLoginStatus();
++                    return user && typeof user.id === 'string' ? user : null;
++                },
++                logout: () => def.auth!.logout(),
++                ...(typeof def.auth.getQrKey === 'function' ? { getQrKey: () => def.auth!.getQrKey!() } : {}),
++                ...(typeof def.auth.createQr === 'function' ? { createQr: (key: string) => def.auth!.createQr!(key) } : {}),
++                ...(typeof def.auth.checkQr === 'function' ? { checkQr: (key: string) => def.auth!.checkQr!(key) } : {}),
++                ...(typeof def.auth.cancelQr === 'function' ? { cancelQr: (key: string) => def.auth!.cancelQr!(key) } : {}),
++                ...(typeof def.auth.getQrTtlMs === 'function' ? { getQrTtlMs: () => Number(def.auth!.getQrTtlMs!()) } : {}),
++            },
++        } : {}),
++        // A mod-declared `library` becomes the host's OnlineLibraryProvider, and its track listing
++        // goes to `catalog` — the same split built-ins use. Collections are only openable when the
++        // mod implements getCollectionTracks.
++        ...(capabilities.userLibrary && def.library ? {
++            library: {
++                getUserPlaylists: async (userId, limit, offset) => {
++                    const page = await def.library!.getUserCollections(String(userId), { limit, offset });
++                    const items = (page?.items ?? []).map((collection) => toProviderCollection(providerId, collection));
++                    return {
++                        items,
++                        hasMore: Boolean(page?.hasMore),
++                        nextOffset: offset + items.length,
++                        ...(Number.isFinite(page?.total) ? { total: page.total } : {}),
++                    };
++                },
++                // 专辑 tab 需要它；模组没实现就不挂这条，capabilities.userAlbums 也是 false
++                ...(typeof def.library.getUserAlbums === 'function' ? {
++                    getUserAlbums: async (userId, limit, offset) => {
++                        const page = await def.library!.getUserAlbums!(String(userId), { limit, offset });
++                        const items = (page?.items ?? []).map((collection) => toProviderCollection(providerId, collection));
++                        return {
++                            items,
++                            hasMore: Boolean(page?.hasMore),
++                            nextOffset: offset + items.length,
++                            ...(Number.isFinite(page?.total) ? { total: page.total } : {}),
++                        };
++                    },
++                } : {}),
++            },
++        } : {}),
++        ...(typeof def.library?.getCollectionTracks === 'function' || typeof def.library?.getAlbumTracks === 'function' ? {
++            catalog: {
++                ...(typeof def.library?.getCollectionTracks === 'function' ? {
++                    getPlaylistTracks: async (id, limit, offset, collection) => {
++                        const page = await def.library!.getCollectionTracks!(
++                            String(id), { limit, offset }, collection?.providerData,
++                        );
++                        const items = (page?.items ?? []).filter(isProviderSong).map((song) => toUnifiedSong(providerId, song));
++                        return {
++                            items,
++                            hasMore: Boolean(page?.hasMore),
++                            nextOffset: offset + items.length,
++                            ...(Number.isFinite(page?.total) ? { total: page.total } : {}),
++                        };
++                    },
++                } : {}),
++                // 专辑卡片走这条路：omni.getCollectionTracks 对 type==='album' 只问 getAlbumTracks
++                ...(typeof def.library?.getAlbumTracks === 'function' ? {
++                    getAlbumTracks: async (id, limit, offset) => {
++                        // 宿主的这个签名把 limit/offset 标成可选，缺省时按整张专辑取
++                        const pageLimit = Number(limit) > 0 ? Number(limit) : 500;
++                        const pageOffset = Number(offset) > 0 ? Number(offset) : 0;
++                        const page = await def.library!.getAlbumTracks!(String(id), { limit: pageLimit, offset: pageOffset });
++                        const items = (page?.items ?? []).filter(isProviderSong).map((song) => toUnifiedSong(providerId, song));
++                        return {
++                            items,
++                            hasMore: Boolean(page?.hasMore),
++                            nextOffset: pageOffset + items.length,
++                            ...(Number.isFinite(page?.total) ? { total: page.total } : {}),
++                        };
++                    },
++                } : {}),
++            },
++        } : {}),
++        // 电台 tab 的三张卡片：私人 FM / 每日推荐各是一串歌，推荐歌单是一串 collection。
++        // 没实现的那个口子在这里根本不挂，宿主那边拿到的就是空数组。
++        ...(capabilities.recommendations && def.recommendations ? {
++            recommendations: {
++                ...(typeof def.recommendations.getPersonalFm === 'function' ? {
++                    getPersonalFm: async () => (await def.recommendations!.getPersonalFm!() ?? [])
++                        .filter(isProviderSong).map((song) => toUnifiedSong(providerId, song)),
++                } : {}),
++                ...(typeof def.recommendations.getDailySongs === 'function' ? {
++                    getDailySongs: async (refresh?: boolean) => (await def.recommendations!.getDailySongs!(refresh) ?? [])
++                        .filter(isProviderSong).map((song) => toUnifiedSong(providerId, song)),
++                } : {}),
++                ...(typeof def.recommendations.getRecommendedCollections === 'function' ? {
++                    getRecommendedCollections: async (limit: number) => (await def.recommendations!.getRecommendedCollections!(limit) ?? [])
++                        .map((collection) => toProviderCollection(providerId, collection)),
++                } : {}),
++            },
++        } : {}),
+     };
+ };
+ 
+ export const omniProvidersRegistry = createFoliumRegistry<FoliumOmniProviderDef, { def: FoliumOmniProviderDef; providerId: string }>('omni.providers', {
+     validate: (def, { id }) => {
+-        if (!def.search && !def.getAudioUrl && !def.getLyrics) {
+-            throw new Error('omni.providers.register: implement at least one of search / getAudioUrl / getLyrics');
++        if (!def.search && !def.getAudioUrl && !def.getLyrics && !def.auth) {
++            throw new Error('omni.providers.register: implement at least one of search / getAudioUrl / getLyrics / auth');
+         }
+         const providerId = foliumProviderId(id);
+         if (getOnlineMusicProvider(providerId)) {
+-- 
+2.54.0.windows.1
+

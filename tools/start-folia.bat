@@ -15,10 +15,19 @@ rem  Without it the UI silently keeps running the last build.
 rem
 rem  Keep this file ASCII-only: cmd.exe parses .bat as GBK on
 rem  zh-CN Windows, so non-ASCII comments break the script.
+rem
+rem  WHY Electron is started through PowerShell with redirection:
+rem  `start "" electron.exe .` gives the GUI process no usable
+rem  stdout, and Folia's main process writes console logs -- the
+rem  first write dies with "EPIPE: broken pipe" and kills the
+rem  process a few seconds in (window stays on the loading screen).
+rem  Redirecting both streams to files fixes that and keeps the
+rem  [Mod:bodian-source] log reachable at tools\out\folia.log.
 rem ============================================================
 title Folia
 
 set "FOLIA_DIR=G:\BoDianBoFangQi\folia"
+set "OUT_DIR=G:\BoDianBoFangQi\tools\out"
 
 if not exist "%FOLIA_DIR%\package.json" (
     echo [ERROR] Folia directory not found: %FOLIA_DIR%
@@ -45,7 +54,7 @@ echo [2/2] waiting for port 3000 ...
 set /a tries=0
 
 :waitloop
-timeout /t 1 /nobreak >nul
+ping -n 2 127.0.0.1 >nul
 netstat -an | findstr ":3000" | findstr "LISTENING" >nul 2>&1
 if %errorlevel% equ 0 goto ready
 set /a tries+=1
@@ -55,13 +64,15 @@ echo [WARN] vite not ready after 30s, launching Folia anyway ...
 
 :ready
 echo.
+if not exist "%OUT_DIR%" mkdir "%OUT_DIR%"
 echo launching Electron window ...
+echo   log: %OUT_DIR%\folia.log
 set ELECTRON_DEV=true
-start "" "node_modules\electron\dist\electron.exe" . --remote-debugging-port=9444
+start "folia-electron" /min powershell -NoProfile -Command "Start-Process -FilePath 'node_modules\electron\dist\electron.exe' -WorkingDirectory '%FOLIA_DIR%' -ArgumentList '.','--remote-debugging-port=9444' -RedirectStandardOutput '%OUT_DIR%\folia.log' -RedirectStandardError '%OUT_DIR%\folia.err.log'"
 
 echo.
 echo DevTools opens on purpose in this mode; close it with:
 echo   curl http://127.0.0.1:9444/json/list   (then /json/close/^<id^>)
 echo This window can be closed.
-timeout /t 3 /nobreak >nul
+ping -n 4 127.0.0.1 >nul
 exit /b 0

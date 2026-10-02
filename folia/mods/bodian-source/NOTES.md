@@ -44,6 +44,24 @@ DevTools 窗口会盖住 Folia 主界面，看起来就像「什么都没显示�
 Tailwind v4 靠 `.git` 定位「项目根」做内容扫描。改名后 utility class 一条都不生成
 （`index.css` 从 252KB 掉到 12KB），界面变成一堆没有样式的裸文字。
 
+## 双击启动脚本后「一直加载」——EPIPE 打死了主进程
+
+症状：双击 `tools/start-folia.bat`，窗口出现后停在加载画面，进程几秒到二十几秒后消失
+（反复点就是反复加载）。
+
+原因：`start "" electron.exe .` 拉起的 GUI 进程**没有可用的 stdout**，而 Folia 主进程的
+console 被 `electron/debugHost.cjs` 覆写过，启动日志一写就
+`uncaughtException: EPIPE: broken pipe, write` → 主进程退出，窗口留在加载态。
+注意这跟模组无关：`qq-music-api`、`modSystem.emitLog` 的 `console.log` 都一样会触发。
+
+**第一现场**：`folia/node_modules/electron/dist/logs/crash-*.log`
+（`Kind  uncaughtException`，栈里是 `console.log` / `emitLog`）。启动即退先看这里，比猜快得多。
+
+修法（已落在 `tools/start-folia.bat`）：不要用 `start ""` 直起 electron，用
+`Start-Process -RedirectStandardOutput/-RedirectStandardError` 把两个流都指向文件，
+stdout 有效就不会 EPIPE；顺带日志固定到 `tools\out\folia.log`，所有 `[Mod:bodian-source]`
+都在里面。手动启动时同理，别裸跑 `electron.exe .`。
+
 ## 验证 UI 必须截图
 
 `document.body.innerText` 只能证明文字在，**证明不了样式对**。

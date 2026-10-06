@@ -1,7 +1,7 @@
 From c01f15d81432a5033778f08aa6ab23f08bf8fce0 Mon Sep 17 00:00:00 2001
 From: Winter wuyuhang <155148127+2075689219@users.noreply.github.com>
 Date: Fri, 2 Oct 2026 14:50:39 +0800
-Subject: [PATCH 1/2] =?UTF-8?q?feat(mods):=20=E6=A8=A1=E7=BB=84=E9=9F=B3?=
+Subject: [PATCH 1/3] =?UTF-8?q?feat(mods):=20=E6=A8=A1=E7=BB=84=E9=9F=B3?=
  =?UTF-8?q?=E6=BA=90=E7=9A=84=E6=9C=AC=E5=9C=B0=E6=89=A9=E5=B1=95=20?=
  =?UTF-8?q?=E2=80=94=E2=80=94=20=E7=99=BB=E5=BD=95=20/=20=E6=AD=8C?=
  =?UTF-8?q?=E5=8D=95=20/=20=E4=B8=93=E8=BE=91=20/=20=E7=94=B5=E5=8F=B0?=
@@ -622,7 +622,7 @@ index 297f43b..3e2ed25 100644
 From 0940b7a70df923bd58ef4450655df9c35bd71aa5 Mon Sep 17 00:00:00 2001
 From: Winter wuyuhang <155148127+2075689219@users.noreply.github.com>
 Date: Tue, 6 Oct 2026 17:24:42 +0800
-Subject: [PATCH 2/2] =?UTF-8?q?feat(omni):=20=E6=90=9C=E7=B4=A2=E6=AD=8C?=
+Subject: [PATCH 2/3] =?UTF-8?q?feat(omni):=20=E6=90=9C=E7=B4=A2=E6=AD=8C?=
  =?UTF-8?q?=E5=8D=95=20=E2=80=94=E2=80=94=20=E4=BB=8E=E5=A5=91=E7=BA=A6?=
  =?UTF-8?q?=E5=88=B0=E7=95=8C=E9=9D=A2=E7=9A=84=E4=B8=8A=E6=B8=B8=E7=BA=A7?=
  =?UTF-8?q?=E8=83=BD=E5=8A=9B?=
@@ -1123,6 +1123,317 @@ index 7aa223f..3bf5f5c 100644
  }
  
  export interface OnlinePlaybackProvider {
+-- 
+2.54.0.windows.1
+
+
+From 4232ace4926c5350ac5d08254d5b25065b72c4c3 Mon Sep 17 00:00:00 2001
+From: Winter wuyuhang <155148127+2075689219@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 17:36:01 +0800
+Subject: [PATCH 3/3] =?UTF-8?q?fix(search):=20=E6=90=9C=E7=B4=A2=E6=AD=8C?=
+ =?UTF-8?q?=E5=8D=95=E5=9C=A8=E9=83=A8=E5=88=86=E5=85=A5=E5=8F=A3=E6=8B=BF?=
+ =?UTF-8?q?=E4=B8=8D=E5=88=B0=E7=BB=93=E6=9E=9C=20=E2=80=94=E2=80=94=20?=
+ =?UTF-8?q?=E5=AF=B9=E9=BD=90=E6=90=9C=E7=B4=A2=E6=BA=90=20+=20=E6=AD=8C?=
+ =?UTF-8?q?=E5=8D=95=E5=88=86=E9=A1=B5?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+用户报"自己搜索时没有歌单"，三个问题一起修：
+
+1. 搜索源与当前平台不一致（主因）
+   store 的 searchSourceTab 与激活平台是两份状态：把平台切到波点后，它可能仍是 'netease'，
+   而 'netease' 不在搜索页的音源 tab 列表（当前平台 / 本地 / Navidrome）里 —— 界面上没有任何
+   高亮，用户以为在搜波点，实际搜的是网易云，自然没有歌单分区。
+   现在打开搜索覆盖层时把搜索源对齐到当前平台；用户手动切过的源都在列表里，不会被覆盖。
+   store 新增 action：setSearchSourceTab。
+
+2. 歌单结果纳入缓存
+   restoreSearch（浏览器前进/后退恢复历史）会把歌单结果清掉，表现为"重开搜索只剩歌曲"。
+   现在 results 与 collections 一起写进 searchCache，恢复时一并还原。
+
+3. 歌单分区支持「加载更多」
+   新增 collectionOffset / collectionHasMore 与 loadMoreSearchCollections（点一次追加一页 12 条，
+   hasMore 先落下当并发锁）；分区尾部是一张虚线"加载更多"卡片。
+   collectionHasMore 同样进缓存，否则恢复历史后按钮会消失。
+
+实测：首页搜索「民谣」→ 12 个歌单、按钮可见；点一次 → 24 个、hasMore 仍 true；
+把 searchSourceTab 打回 'netease' 后 1.2s 内自动纠正为波点。
+---
+ src/components/app/search/SearchWorkspace.tsx | 39 +++++++++-
+ src/stores/useSearchNavigationStore.ts        | 71 ++++++++++++++++---
+ 2 files changed, 100 insertions(+), 10 deletions(-)
+
+diff --git a/src/components/app/search/SearchWorkspace.tsx b/src/components/app/search/SearchWorkspace.tsx
+index 3de5465..4af8d2d 100644
+--- a/src/components/app/search/SearchWorkspace.tsx
++++ b/src/components/app/search/SearchWorkspace.tsx
+@@ -1,6 +1,6 @@
+ import React, { useEffect, useMemo } from 'react';
+ import { AnimatePresence, motion } from 'framer-motion';
+-import { AlertCircle, Loader2, Search, X } from 'lucide-react';
++import { AlertCircle, Loader2, Plus, Search, X } from 'lucide-react';
+ import { useTranslation } from 'react-i18next';
+ import { useShallow } from 'zustand/react/shallow';
+ import type { Theme, UnifiedSong } from '../../../types';
+@@ -49,6 +49,7 @@ const SearchWorkspace: React.FC<SearchWorkspaceProps> = ({
+         searchSourceTab,
+         searchResults,
+         searchCollectionResults,
++        collectionHasMore,
+         isSearchOpen,
+         isSearching,
+         isLoadingMore,
+@@ -57,11 +58,14 @@ const SearchWorkspace: React.FC<SearchWorkspaceProps> = ({
+         scrollTop,
+         setSearchQuery,
+         setSearchScrollTop,
++        setSearchSourceTab,
++        loadMoreSearchCollections,
+     } = useSearchNavigationStore(useShallow(state => ({
+         searchQuery: state.searchQuery,
+         searchSourceTab: state.searchSourceTab,
+         searchResults: state.searchResults,
+         searchCollectionResults: state.searchCollectionResults,
++        collectionHasMore: state.collectionHasMore,
+         isSearchOpen: state.isSearchOpen,
+         isSearching: state.isSearching,
+         isLoadingMore: state.isLoadingMore,
+@@ -70,11 +74,28 @@ const SearchWorkspace: React.FC<SearchWorkspaceProps> = ({
+         scrollTop: state.scrollTop,
+         setSearchQuery: state.setSearchQuery,
+         setSearchScrollTop: state.setSearchScrollTop,
++        setSearchSourceTab: state.setSearchSourceTab,
++        loadMoreSearchCollections: state.loadMoreSearchCollections,
+     })));
+     const results = searchResults || [];
+     const collections = searchCollectionResults || [];
+     const activeOnlineProviderId = useOnlineProviderAccountStore(state => state.activeProviderId);
+     const sources = useMemo<SearchSource[]>(() => [activeOnlineProviderId, 'local', 'navidrome'], [activeOnlineProviderId]);
++
++    /**
++     * LOCAL CHANGE (bodian-source): 打开搜索时把「搜索音源」对齐到当前平台。
++     *
++     * store 的 `searchSourceTab` 与当前激活平台是两份状态：把平台切到波点之后，它可能仍停在
++     * `netease`，而 `netease` 不在下面的音源 tab 列表里 —— 界面没有任何高亮，用户以为在搜波点，
++     * 实际搜的是网易云（于是没有歌单分区，连搜索结果的来源都是错的）。这里在打开时纠正一次；
++     * 用户手动切过的源（本地 / Navidrome / 其它平台）都在列表里，不会被覆盖。
++     */
++    useEffect(() => {
++        if (!isSearchOpen || isSearching) return;
++        if (!sources.includes(searchSourceTab)) {
++            setSearchSourceTab(activeOnlineProviderId);
++        }
++    }, [activeOnlineProviderId, isSearchOpen, isSearching, searchSourceTab, setSearchSourceTab, sources]);
+     const hasCollection = useCollectionNavigationStore(state => Boolean(state.snapshot?.stack.length));
+     const getSourceLabel = (source: SearchSource) => {
+         if (source === 'local') return t('search.sourceLocal');
+@@ -214,6 +235,22 @@ const SearchWorkspace: React.FC<SearchWorkspaceProps> = ({
+                                                     onOpen={onOpenCollection}
+                                                 />
+                                             ))}
++                                            {/* LOCAL CHANGE (bodian-source): 加载更多（点一次取下一页；
++                                                store 会先把 hasMore 落下当并发锁，所以按钮会短暂消失） */}
++                                            {collectionHasMore && (
++                                                <button
++                                                    type="button"
++                                                    onClick={() => void loadMoreSearchCollections()}
++                                                    className={`flex w-28 shrink-0 flex-col items-center justify-center gap-1 rounded-2xl border border-dashed text-xs transition-colors ${
++                                                        isDaylight
++                                                            ? 'border-black/15 text-black/55 hover:bg-black/[0.06]'
++                                                            : 'border-white/15 text-white/55 hover:bg-white/[0.08]'
++                                                    }`}
++                                                >
++                                                    <Plus size={16} />
++                                                    {t('home.loadMore')}
++                                                </button>
++                                            )}
+                                         </div>
+                                     </section>
+                                 )}
+diff --git a/src/stores/useSearchNavigationStore.ts b/src/stores/useSearchNavigationStore.ts
+index 447707a..2cc1797 100644
+--- a/src/stores/useSearchNavigationStore.ts
++++ b/src/stores/useSearchNavigationStore.ts
+@@ -29,6 +29,10 @@ type SearchExecutionResult = {
+ 
+ type SearchCacheEntry = {
+     results: UnifiedSong[];
++    /** LOCAL CHANGE (bodian-source): 歌单结果一并缓存，否则重开搜索只剩歌曲。 */
++    collections: ProviderCollection[];
++    /** 歌单分区是否还有下一页（不缓存它的话，恢复历史后"加载更多"按钮会消失）。 */
++    collectionHasMore: boolean;
+     offset: number;
+     hasMore: boolean;
+     scrollTop: number;
+@@ -46,6 +50,9 @@ interface SearchNavigationState {
+      *「歌单」section, and a provider without `searchCollections` leaves it empty.
+      */
+     searchCollectionResults: ProviderCollection[] | null;
++    /** 歌单结果的下一页游标（横向分区"加载更多"用）。 */
++    collectionOffset: number;
++    collectionHasMore: boolean;
+     searchReturnView: SearchReturnView;
+     isSearchOpen: boolean;
+     isSearching: boolean;
+@@ -59,6 +66,16 @@ interface SearchNavigationState {
+     searchCache: Record<string, SearchCacheEntry>;
+     setHomeViewTab: (tab: HomeViewTab) => void;
+     setSearchQuery: (query: string) => void;
++    /**
++     * LOCAL CHANGE (bodian-source): 切换搜索音源。
++     *
++     * 需要它是因为 store 里的 `searchSourceTab` 与当前激活平台是**两份状态**：平台切到波点后，
++     * `searchSourceTab` 还可能停在 'netease'（而它又不在搜索页的音源 tab 列表里，界面上没有
++     * 任何高亮）—— 表现为"在波点平台下搜歌，却搜的是网易云，自然没有歌单"。
++     */
++    setSearchSourceTab: (tab: SearchSource) => void;
++    /** 歌单分区"加载更多"。 */
++    loadMoreSearchCollections: () => Promise<void>;
+     setSearchScrollTop: (scrollTop: number) => void;
+     restoreSearch: (payload: { query: string; sourceTab: SearchSource; returnView?: SearchReturnView; }) => void;
+     hideSearchOverlay: () => void;
+@@ -158,7 +175,7 @@ const searchOnlineProviderSongs = async (
+ const SEARCH_COLLECTION_LIMIT = 12;
+ 
+ /**
+- * LOCAL CHANGE (bodian-source): collection search, best-effort.
++ * LOCAL CHANGE (bodian-source): 歌单搜索，best-effort + 可分页。
+  *
+  * 歌单结果是歌曲结果之外的附加信息：provider 没实现、或者这一次失败，都只是"这个分区不显示"，
+  * 绝不能把整次搜索拖成失败 —— 所以这里自己吞掉错误。
+@@ -166,17 +183,18 @@ const SEARCH_COLLECTION_LIMIT = 12;
+ const searchCollectionsForSource = async (
+     sourceTab: SearchSource,
+     query: string,
+-): Promise<ProviderCollection[]> => {
+-    if (sourceTab === 'local' || sourceTab === 'navidrome') return [];
++    offset = 0,
++): Promise<{ items: ProviderCollection[]; hasMore: boolean; nextOffset: number }> => {
++    if (sourceTab === 'local' || sourceTab === 'navidrome') return { items: [], hasMore: false, nextOffset: 0 };
+     try {
+         const page = await omni.searchProviderCollections(sourceTab, query, {
+             limit: SEARCH_COLLECTION_LIMIT,
+-            offset: 0,
++            offset,
+         });
+-        return page.items;
++        return { items: page.items, hasMore: page.hasMore, nextOffset: page.nextOffset };
+     } catch (error) {
+         console.warn('[SearchStore] collection search failed:', error);
+-        return [];
++        return { items: [], hasMore: false, nextOffset: offset };
+     }
+ };
+ 
+@@ -214,6 +232,8 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+     searchSourceTab: 'netease',
+     searchResults: null,
+     searchCollectionResults: null,
++    collectionOffset: 0,
++    collectionHasMore: false,
+     searchReturnView: 'home',
+     isSearchOpen: false,
+     isSearching: false,
+@@ -232,6 +252,7 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+         set({ homeViewTab: tab });
+     },
+     setSearchQuery: (query) => set({ searchQuery: query }),
++    setSearchSourceTab: (tab) => set({ searchSourceTab: tab }),
+     setSearchScrollTop: (scrollTop) => set(state => {
+         const cacheKey = getSearchCacheKey(state.searchQuery, state.searchSourceTab);
+         const cached = state.searchCache[cacheKey];
+@@ -252,7 +273,9 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+             searchSourceTab: sourceTab,
+             searchReturnView: returnView,
+             searchResults: cached?.results ?? null,
+-            searchCollectionResults: null,
++            searchCollectionResults: cached?.collections ?? null,
++            collectionOffset: cached?.collections?.length ?? 0,
++            collectionHasMore: cached?.collectionHasMore ?? false,
+             offset: cached?.offset ?? 0,
+             hasMore: cached?.hasMore ?? false,
+             scrollTop: cached?.scrollTop ?? 0,
+@@ -268,6 +291,8 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+         searchSourceTab: onlineProviderId ?? state.searchSourceTab,
+         searchResults: null,
+         searchCollectionResults: null,
++        collectionOffset: 0,
++        collectionHasMore: false,
+         searchReturnView: 'home',
+         isSearchOpen: false,
+         isSearching: false,
+@@ -296,6 +321,8 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+             requestId,
+             searchResults: null,
+             searchCollectionResults: null,
++            collectionOffset: 0,
++            collectionHasMore: false,
+             offset: 0,
+             hasMore: false,
+             scrollTop: 0,
+@@ -305,14 +332,16 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+             // 歌曲与歌单并行：歌单那条是附加信息，失败也只让分区为空（见 searchCollectionsForSource）
+             const [result, collections] = await Promise.all([
+                 executeSearch(trimmedQuery, sourceTab, 0, get().limit, deps),
+-                searchCollectionsForSource(sourceTab, trimmedQuery),
++                searchCollectionsForSource(sourceTab, trimmedQuery, 0),
+             ]);
+             if (get().requestId !== requestId) {
+                 return true;
+             }
+             set(state => ({
+                 searchResults: result.results,
+-                searchCollectionResults: collections,
++                searchCollectionResults: collections.items,
++                collectionOffset: collections.nextOffset,
++                collectionHasMore: collections.hasMore,
+                 hasMore: result.hasMore,
+                 offset: result.nextOffset,
+                 isSearching: false,
+@@ -320,6 +349,8 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+                     ...state.searchCache,
+                     [getSearchCacheKey(trimmedQuery, sourceTab)]: {
+                         results: result.results,
++                        collections: collections.items,
++                        collectionHasMore: collections.hasMore,
+                         hasMore: result.hasMore,
+                         offset: result.nextOffset,
+                         scrollTop: 0,
+@@ -385,6 +416,8 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+                         ...state.searchCache,
+                         [getSearchCacheKey(searchQuery, searchSourceTab)]: {
+                             results,
++                            collections: state.searchCollectionResults || [],
++                            collectionHasMore: state.collectionHasMore,
+                             hasMore: result.hasMore,
+                             offset: result.nextOffset,
+                             scrollTop: state.scrollTop,
+@@ -402,4 +435,24 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+             }
+         }
+     },
++    /**
++     * LOCAL CHANGE (bodian-source): 歌单分区「加载更多」。
++     *
++     * 与歌曲翻页各走各的（歌单是一屏卡片，不参与列表的 hasMore）：
++     * 失败只是不再追加，不影响已经拿到的歌单与歌曲。
++     */
++    loadMoreSearchCollections: async () => {
++        const { searchQuery, searchSourceTab, searchCollectionResults, collectionOffset, collectionHasMore } = get();
++        if (!collectionHasMore || !searchQuery.trim()) return;
++        // 先落下 hasMore=false 当并发锁：两次点击不会打两遍同一页
++        set({ collectionHasMore: false });
++
++        const page = await searchCollectionsForSource(searchSourceTab, searchQuery.trim(), collectionOffset);
++        const merged = [...(searchCollectionResults || []), ...page.items];
++        set({
++            searchCollectionResults: merged,
++            collectionOffset: page.nextOffset,
++            collectionHasMore: page.hasMore,
++        });
++    },
+ }));
 -- 
 2.54.0.windows.1
 

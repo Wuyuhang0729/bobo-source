@@ -63,6 +63,16 @@
 
 **回上游时的建议形态**：这是一条完整的上游级能力（任何 provider 都能实现），最适合整体提一个 PR：契约 + omni + store + UI 一起，四个内置源先不实现，行为与现在完全一致。
 
+**另外两个必须一起改的点**（否则用户会看到"搜不到歌单"）：
+
+- **搜索源要对齐当前平台**：`searchSourceTab` 与激活平台是两份状态，平台切到波点后它可能仍是
+  `netease`，而 `netease` 不在音源 tab 列表里（界面上没有高亮）—— 用户以为在搜波点，实际搜的是
+  网易云。现在打开搜索覆盖层时对齐，并新增 `setSearchSourceTab`。
+- **歌单结果要进缓存**：`restoreSearch`（前进/后退恢复历史）原本会把歌单清空。现在
+  `searchCache` 同时存 `results` 与 `collections`（含 `collectionHasMore`）。
+
+歌单分区另外支持「加载更多」（`collectionOffset` / `loadMoreSearchCollections`，一页 12 条）。
+
 ## 三、依赖矩阵：上游只合并一部分时会怎样
 
 | 已合并的部分 | 模组还剩什么能力 |

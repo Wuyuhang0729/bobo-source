@@ -41,6 +41,15 @@ const EXPRESSION = `(async () => {
     return { count: page.items.length, first: page.items.slice(0, 3).map(s => s.name) };
   });
 
+  await step('搜索歌单「民谣」', async () => {
+    if (!provider || !provider.search || !provider.search.searchCollections) {
+      throw new Error('provider 没有 searchCollections 能力');
+    }
+    const page = await provider.search.searchCollections('民谣', 5, 0);
+    if (page.items.length === 0) throw new Error('返回 0 个（看 folia.log 里 searchCollections 那行）');
+    return { count: page.items.length, first: page.items.slice(0, 3).map(c => c.name) };
+  });
+
   await step('私人 FM', async () => {
     const songs = await omni.getPersonalFm();
     if (songs.length === 0) throw new Error('返回 0 首（看 folia.log 里 [bodian] 私人 FM 那行）');

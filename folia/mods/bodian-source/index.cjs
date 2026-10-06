@@ -40,6 +40,7 @@ const {
     toCollectionFromCollected,
     toAlbumFromCollected,
     toRecommendedCollection,
+    toCollectionFromSearch,
 } = require('./lib/mapping.cjs');
 const { describeFailure, formatFailure } = require('./lib/errors.cjs');
 
@@ -237,6 +238,35 @@ module.exports = function activate(api) {
             return { items, hasMore: items.length >= limit };
         } catch (error) {
             return failEmpty(`搜索 "${query}"`, error, { items: [], hasMore: false });
+        }
+    });
+
+    // ------------------------------------------------------------ 搜索歌单
+    // 真机验证：GET /api/search/playlist/list?keyword=&pn=&rn=（库内部把 1-based page 转成
+    // 从 0 开始的 pn）→ data.resultList，条目带 source/sourceType —— 取曲目要用它。
+    api.rpc.handle('bodian.searchCollections', async (query, page) => {
+        const limit = Number(page && page.limit) > 0 ? Number(page.limit) : 20;
+        const offset = Number(page && page.offset) > 0 ? Number(page.offset) : 0;
+
+        try {
+            const list = await client.searchPlaylists(String(query), {
+                page: toPageNumber(offset, limit),
+                pageSize: limit,
+            });
+            const items = list
+                .map(toCollectionFromSearch)
+                .filter((collection) => collection.id && collection.name)
+                // id 自带 source：点开时模组自己解码，宿主不需要回传 providerData
+                .map(({ source, ...rest }) => ({
+                    ...rest,
+                    id: encodeCollectionId(source, rest.id),
+                    providerData: { source },
+                }));
+            api.log.info(`[bodian] searchCollections "${query}" offset=${offset} → ${items.length} 个`);
+            // 库只回 list、不回 total，所以按"这一页填满了就还有下一页"判断
+            return { items, hasMore: items.length >= limit };
+        } catch (error) {
+            return failEmpty(`搜索歌单 "${query}"`, error, { items: [], hasMore: false });
         }
     });
 

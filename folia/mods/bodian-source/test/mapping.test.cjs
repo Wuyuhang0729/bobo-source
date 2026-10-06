@@ -17,6 +17,7 @@ const {
     toCollectionFromCollected,
     toAlbumFromCollected,
     toRecommendedCollection,
+    toCollectionFromSearch,
 } = require('../lib/mapping.cjs');
 
 // 首页模块 10（心动收藏相似推荐）里的真实条目形状
@@ -166,4 +167,33 @@ test('推荐歌单映射：sourceType 进 providerData、简介里的 &nbsp; 换
         providerData: { source: '13' },
     });
     assert.equal(toRecommendedCollection({ id: 1, name: 'x' }).providerData.source, '13', '缺 sourceType 时按平台目录 13');
+});
+
+test('搜歌单映射：source 保留在内部形状里（点开取曲目要用）', () => {
+    const collection = toCollectionFromSearch({
+        id: 280301309,
+        source: '4',
+        name: '摇滚现场',
+        cover: 'cover-url',
+        trackCount: 51,
+        playCount: 12043,
+        creatorId: '42',
+        creatorName: '某人',
+        raw: {},
+    });
+    assert.deepEqual(collection, {
+        id: '280301309',
+        name: '摇滚现场',
+        type: 'playlist',
+        source: '4',
+        coverUrl: 'cover-url',
+        trackCount: 51,
+        playCount: 12043,
+        creatorName: '某人',
+    });
+});
+
+test('搜歌单映射：缺字段时不凭空造键，source 退到平台目录 13', () => {
+    const minimal = toCollectionFromSearch({ id: 1, name: '只有名字' });
+    assert.deepEqual(minimal, { id: '1', name: '只有名字', type: 'playlist', source: '13' });
 });

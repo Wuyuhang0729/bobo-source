@@ -42,6 +42,15 @@ export default function activate(folium) {
       return call('search', query, page);
     },
 
+    // ---- 搜索歌单（宿主搜索页的「歌单」分区；实现在 main，这里只转发）
+    async searchCollections(query, page) {
+      folium.log.info(`[bodian] searchCollections query="${query}" limit=${page.limit} offset=${page.offset}`);
+      if (USE_FAKE) {
+        return { items: [], hasMore: false, total: 0 };
+      }
+      return call('searchCollections', query, page);
+    },
+
     // ---- 单曲详情（队列/历史里重开后靠它还原）
     async getSong(id) {
       if (USE_FAKE) {

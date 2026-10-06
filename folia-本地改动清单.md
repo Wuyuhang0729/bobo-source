@@ -14,6 +14,12 @@
 | `src/components/Grid3D.tsx` | `LOGIN_COPY_BY_PROVIDER` 增加 `folium.bodian-source.bodian` | 体验：否则弹窗写成「使用网易云APP扫码」 |
 | `src/i18n/locales/{en,in,zh-CN}.ts` | `loginTitleBodian` / `loginNoteBodian` | 同上 |
 | `package.json`（build.extraResources） | 把 `mods/bodian-source` 打进 `resources/mods/` | 交付：否则安装包不带模组（仍可用 zip 安装） |
+| `src/types/onlineMusic.ts` | `OnlineSearchProvider.searchCollections?` | 搜索歌单：上游搜索只回歌曲，音源"能搜歌单"原本无处返回 |
+| `src/services/onlineMusic/omni.ts` | `searchCollections` / `searchProviderCollections` | 同上；未实现的音源返回空页（不抛错，内置源行为不变） |
+| `src/stores/useSearchNavigationStore.ts` | 歌单搜索结果（best-effort，与歌曲搜索并行） | 否则搜索页拿不到歌单数据 |
+| `src/components/app/search/SearchCollectionCard.tsx` | **新文件**：歌单卡片 | 搜索页「歌单」分区的渲染单元 |
+| `src/components/app/search/SearchWorkspace.tsx` | 结果区加「歌单」分区（空态判断同时看两者） | 没有它用户看不到任何歌单结果 |
+| `src/components/app/overlays/buildAppOverlaysModel.ts` + `src/App.tsx` | 把「点开歌单」接到既有 `navigateToCollection` | 否则卡片点不动 |
 
 ## 二、逐项要点（回上游时要解释的东西）
 
@@ -47,6 +53,16 @@
 ### 5. `package.json` —— 安装包内嵌模组
 `extraResources` 用 `from: "mods" + filter: ["bodian-source/**/*"]` 的写法，**仓库里没有这个模组时也不会打包失败**（filter 无匹配即跳过），这是为了上游克隆不包含私人模组时仍能出包。
 
+### 6. 搜索歌单 —— 从契约到界面的四处扩展
+上游的搜索只回歌曲（`OnlineSearchProvider` 只有 `searchSongs`，内置三个源也没搜过歌单），所以"音源能搜歌单"这件事在上游根本没有出口。这条链上一共四处：
+
+- `types/onlineMusic.ts`：`searchCollections?`（**可选**，不实现就等于没这个能力）；
+- `omni.ts`：`searchCollections` / `searchProviderCollections`，未实现时返回空页而不抛错；
+- `useSearchNavigationStore`：与歌曲**并行**取歌单结果，单独 try/catch —— 歌单失败只是"分区不显示"，不能把整次搜索拖成失败；
+- 界面：`SearchWorkspace` 的「歌单」分区 + `SearchCollectionCard`，点开复用既有的 `navigateToCollection(..., 'search')`。
+
+**回上游时的建议形态**：这是一条完整的上游级能力（任何 provider 都能实现），最适合整体提一个 PR：契约 + omni + store + UI 一起，四个内置源先不实现，行为与现在完全一致。
+
 ## 三、依赖矩阵：上游只合并一部分时会怎样
 
 | 已合并的部分 | 模组还剩什么能力 |
@@ -54,6 +70,7 @@
 | 只有 contract + registry | 搜索 / 播放 / 歌词 / 登录 / 歌单 tab 可用；**专辑点进去是空的**（缺 catalog.getAlbumTracks 转发）；电台不可用 |
 | 再加 hooks | 账号状态与歌单刷新正常 |
 | 再加 package.json | 安装包自带音源 |
+| 再加「搜索歌单」四处 | 搜索页多出「歌单」分区（只对实现了 `searchCollections` 的音源） |
 | 只合并 hooks / i18n（没合并 registry） | 什么都不会点亮 —— `capabilities` 仍是 false |
 
 模组侧对宿主补丁的**功能性依赖只剩一条**：`getPlaylistTracks` 需要 `providerData` 回传 `source`。

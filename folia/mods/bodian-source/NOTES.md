@@ -227,6 +227,28 @@ node tools/pack-mod.mjs      # → tools/out/bodian-source-<version>.zip
 把 zip 拖进「设置 → 系统 → 模组」面板，或解压到 `%APPDATA%\Folia\mods\bodian-source\` 后重启。
 **两种方式只选一种**：用户目录和仓库目录各留一份，就是上一节说的「重复 → 平台消失」。
 
+## 搜索歌单（宿主级能力，不是模组私有）
+
+上游的搜索只回歌曲 —— `OnlineSearchProvider` 只有 `searchSongs`，内置四个源也没谁搜过歌单，
+所以"音源能搜歌单"原本连出口都没有。现在这条链是：
+
+| 层 | 位置 | 关键点 |
+|---|---|---|
+| 契约（宿主） | `src/types/onlineMusic.ts` 的 `OnlineSearchProvider.searchCollections?` | **可选**：不实现就等于没有这个能力，内置源行为完全不变 |
+| 契约（模组） | folium 的 `FoliumOmniProviderDef.searchCollections?` | 与 `search` 相互独立，只实现其一也能注册 |
+| 取数 | `omni.searchProviderCollections()` → 模组 `bodian.searchCollections` | 未实现时返回空页而不抛错 |
+| 界面 | `SearchWorkspace` 的「歌单」分区 + `SearchCollectionCard` | 空态判断同时看歌曲与歌单（只有歌单结果时也照常显示） |
+
+**波点接口**：`GET /api/search/playlist/list?keyword=&pn=&rn=`（库的 `client.searchPlaylists` 已把
+1-based page 转成从 0 开始的 `pn`）→ `data.resultList`，条目经 `normalizePlaylistBrief` 归一成
+`{ id, source, name, cover, trackCount, playCount, creatorName }`。
+
+**这里省了一件事**：条目自带 `source`（平台目录 13 / 自建 5 …），直接喂给已有的
+**id 自解释编码**（`p13_xxx`）—— 搜出来的歌单点开时不需要宿主回传 providerData，
+与「我的歌单」走同一条取曲目路径。实测：搜「民谣」→ 12 个歌单，点开第一个取到 91 首。
+
+**注意**：库只回列表、不回 total，所以 `hasMore` 按"这一页填满了"判断。
+
 ## 工程化工具与约定（出问题先跑 doctor）
 
 三个脚本，都在 `tools/`，零依赖：
@@ -234,7 +256,7 @@ node tools/pack-mod.mjs      # → tools/out/bodian-source-<version>.zip
 | 命令 | 用途 |
 |---|---|
 | `node tools/doctor.mjs` | 四级自检：vite(3000) → CDP 页面(9444) → provider 是否注册 → 模组 enabled / trustStale / 重复。失败项直接给下一步动作 |
-| `node tools/probe-bodian.mjs` | 端到端功能探针：搜索 / 私人 FM / 每日推荐 / 推荐歌单 / 我的歌单 / 专辑与曲目，逐项打条数与耗时。**不碰 token** —— 请求全走渲染进程的 omni，等价于在界面上点一下 |
+| `node tools/probe-bodian.mjs` | 端到端功能探针：搜索（歌曲 + 歌单）/ 私人 FM / 每日推荐 / 推荐歌单 / 我的歌单 / 专辑与曲目，逐项打条数与耗时。**不碰 token** —— 请求全走渲染进程的 omni，等价于在界面上点一下 |
 | `node tools/test-mod.mjs` | 模组单测（`node:test`）：字段映射、collection id 编解码、失败分类。上游一改字段这里先红，不用等用户发现列表没封面 |
 
 两条改模组时的约定：

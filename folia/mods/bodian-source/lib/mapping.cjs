@@ -149,6 +149,31 @@ const toRecommendedCollection = (item) => ({
     providerData: { source: firstText(item.sourceType) || '13' },
 });
 
+/**
+ * 搜歌单结果（库的 `normalizePlaylistBrief`）→ collection（内部形状，带 source）。
+ *
+ * 真机核对过的形状：{ id, source, name, cover, trackCount, playCount, creatorId, creatorName, raw }。
+ * 关键是 `source`（歌单所属目录：平台 13 / 自建 5 …）—— 有它才能取曲目，所以保留在内部形状里，
+ * 由调用方编码进 id（`p<source>_<id>`）。
+ */
+const toCollectionFromSearch = (item) => {
+    const collection = {
+        id: String(item.id),
+        name: String(item.name || ''),
+        type: 'playlist',
+        source: firstText(item.source) || '13',
+    };
+    const cover = firstText(item.cover);
+    if (cover) collection.coverUrl = cover;
+    const trackCount = positiveNumber(item.trackCount);
+    if (trackCount) collection.trackCount = trackCount;
+    const playCount = positiveNumber(item.playCount);
+    if (playCount) collection.playCount = playCount;
+    const creatorName = firstText(item.creatorName);
+    if (creatorName) collection.creatorName = creatorName;
+    return collection;
+};
+
 module.exports = {
     firstText,
     positiveNumber,
@@ -162,4 +187,5 @@ module.exports = {
     toCollectionFromCollected,
     toAlbumFromCollected,
     toRecommendedCollection,
+    toCollectionFromSearch,
 };

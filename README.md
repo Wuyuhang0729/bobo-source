@@ -15,12 +15,13 @@
 ## 🧭 先选一个
 
 > [!TIP]
-> 多数人只需要**第一个** —— 下载 `Folia-Setup-<版本>.exe`，装完就能用。
+> 多数人只需要**第一个** —— [下载 `Folia-Setup-<版本>.exe`](https://github.com/Wuyuhang0729/bobo-source/releases/latest)，
+> 装完就是"波点音乐版 Folia"（补丁已经在里面了，不用管）。
 
 | 你想要的 | 用什么 | 能拿到 |
 |---|---|---|
-| ⭐ **只是想听歌（推荐）** | Release 里的 `Folia-Setup-<版本>.exe` | 全部功能 |
-| 想要免安装的便携版 | Release 里的 `Folia-<版本>-win-unpacked.zip` | 全部功能，解压即用 |
+| ⭐ **只是想听歌（推荐）** | [下载 `Folia-Setup-<版本>.exe`](https://github.com/Wuyuhang0729/bobo-source/releases/latest)（Release 附件里最大的那个） | 全部功能 |
+| 想要免安装的便携版 | [下载 `Folia-<版本>-win-unpacked.zip`](https://github.com/Wuyuhang0729/bobo-source/releases/latest) | 全部功能，解压即用 |
 | 已经有打过补丁的 Folia | Release 里的 `bodian-source-<版本>.zip` | 全部功能，拖进模组面板 |
 | 只有官方原版 Folia | ⚠️ 光拖 zip **不够** | 只有搜索 / 播放 / 歌词 |
 | **想自己构建 / 改代码** | [带补丁的 Folia fork](https://github.com/Wuyuhang0729/folia-major) | 全部功能（clone 即可） |
@@ -55,9 +56,9 @@
 
 ### ① 装安装包（推荐，开箱即用）
 
-1. 从 [Releases](https://github.com/Wuyuhang0729/bobo-source/releases) 下载 **`Folia-Setup-<版本>.exe`**
-2. 双击安装，启动 Folia
-3. 打开「**设置 → 系统 → 模组**」，找到「**波点音乐**」→ 点 **启用** → 在系统弹窗里点 **确认**
+1. 从 [Releases](https://github.com/Wuyuhang0729/bobo-source/releases/latest) 下载 **`Folia-Setup-<版本>.exe`**（附件里最大的那个，约 141 MB）
+2. 双击安装 —— 是**普通安装向导**（不是一键装完），可选安装目录，装完会有桌面 / 开始菜单快捷方式
+3. 启动 Folia，打开「**设置 → 系统 → 模组**」，找到「**波点音乐**」→ 点 **启用** → 在系统弹窗里点 **确认**（弹窗默认停在被取消的按钮上，看清再点）
 
     <!-- GIF:enable-mod   启用「波点音乐」+ 系统确认弹窗
          （缩进 4 空格是为了不打断上面的编号；删掉注释粘贴动图）
@@ -69,6 +70,11 @@
     <!-- GIF:login-qr     扫码登录弹窗（录弹窗出现即可，别等二维码刷新）
          <img src="粘贴你的GIF地址" width="820" alt="扫码登录">
     -->
+
+> [!WARNING]
+> **安装包没有代码签名**，Windows 大概率会拦一下：出现「Windows 已保护你的电脑」时点
+> 「**更多信息**」→「**仍要运行**」。极少数杀软会误报（Electron 应用的常见现象），加信任即可。
+> 不想折腾这些就用 ② 的免安装版，功能完全一样。
 
 > [!IMPORTANT]
 > 第 3 步只需要做一次。之后**只要模组文件变了**（更新模组、或你自己改了它的文件），

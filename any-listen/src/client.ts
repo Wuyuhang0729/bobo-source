@@ -7,6 +7,7 @@
 import { randomBytes } from 'node:crypto';
 
 import {
+  audioUrl as apiAudioUrl,
   checkRight as apiCheckRight,
   convertUrl as apiConvertUrl,
   lyric as apiLyric,
@@ -176,6 +177,55 @@ export class BodianClient {
 
     if (lastError instanceof Error) throw lastError;
     throw new Error(`无法解析播放地址: ${musicId}`);
+  }
+
+  /**
+   * 解析播放地址（**账号通道**）。
+   *
+   * 与 {@link getMusicUrl}（车机通道，匿名就能拿到整曲）相对：这条走 bd-api 的
+   * `checkRight` → `audioUrl`，用**登录账号自己的权益**换地址，因此需要有效的 `uid`/`token`；
+   * 没有登录态时用 {@link getPreviewUrl}（官方给匿名的 29 秒片段）。
+   *
+   * 真机验证（登录态）：普通歌与 VIP 歌都返回**全曲**地址（字段 `audioHttpsUrl`），`Range` 可用
+   * （206）；这条通道上 flac 请求会被服务端降级成 320k mp3，音质上限取决于账号权益。
+   */
+  async getAccountUrl(musicId: string, options: MusicUrlOptions = {}): Promise<MusicUrlResult> {
+    const requested = options.quality ?? '320k';
+    const requestedIndex = QUALITY_ORDER.indexOf(requested);
+    const candidates =
+      options.fallback === false || requestedIndex <= 0
+        ? [requested]
+        : QUALITY_ORDER.slice(0, requestedIndex + 1).reverse();
+
+    let lastError: unknown;
+
+    for (const quality of candidates) {
+      const spec = QUALITY_SPECS[quality];
+      try {
+        // 先问权限再换地址：真机 status 1 = 普通歌、4 = VIP 歌，登录后两者都放行全曲
+        await apiCheckRight(this.ctx, { musicId });
+        const data = await apiAudioUrl(this.ctx, { musicId, format: spec.format, br: spec.br });
+        const url = toText(data.audioHttpsUrl) || toText(data.audioUrl);
+        if (!url) throw new Error(`账号通道未返回播放地址: ${musicId}`);
+
+        const actual = qualityFromAudio(toText(data.format), toNumber(data.bitrate)) ?? quality;
+
+        return {
+          url,
+          quality: actual,
+          format: toText(data.format) || spec.format,
+          bitrate: toNumber(data.bitrate),
+          duration: toNumber(data.duration),
+          via: 'bd-api-audioUrl',
+          restricted: false,
+        };
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    if (lastError instanceof Error) throw lastError;
+    throw new Error(`无法解析账号播放地址: ${musicId}`);
   }
 
   /**

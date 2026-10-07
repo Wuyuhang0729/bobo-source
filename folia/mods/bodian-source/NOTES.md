@@ -110,8 +110,7 @@ stdout 有效就不会 EPIPE；顺带日志固定到 `tools\out\folia.log`，所
 
 1. **看模组列表**（设置 → 系统 → 模组）：出现 `duplicate mod id` 条目，或「该模组的文件在你上次
    确认之后发生了变化，已自动禁用」，就是这条问题。
-2. **三个扫描目录各查一遍同 id**（一个 id 只留一份；把 `<仓库根>` 换成本机 checkout 路径，
-   本机是 `G:\BoDianBoFangQi`）：
+2. **三个扫描目录各查一遍同 id**（一个 id 只留一份；把 `<仓库根>` 换成本机 checkout 路径）：
    ```powershell
    $repo = '<仓库根>'
    Get-ChildItem -Recurse -Filter mod.json `

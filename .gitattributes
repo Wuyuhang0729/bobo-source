@@ -1,0 +1,17 @@
+# 让换行符在跨平台 clone 时保持不变：
+#   - patch 与 .sh 不能被 CRLF 污染（否则 git am / bash 会失败）
+#   - Windows 批处理必须是 CRLF
+#   - 其余文本交给 git 自动判定
+* text=auto
+*.patch -text
+*.sh text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制
+*.png binary
+*.jpg binary
+*.ico binary
+*.exe binary
+*.zip binary

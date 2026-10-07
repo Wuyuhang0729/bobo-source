@@ -1,0 +1,47 @@
+NOTICE
+======
+
+本仓库包含对第三方开源项目的修改与再分发，说明如下。
+
+1. Folia（上游项目）
+--------------------
+
+  项目：Folia / folia-major
+  来源：https://github.com/chthollyphile/folia-major
+  许可：GNU Affero General Public License v3.0（全文见本仓库 LICENSE）
+
+  本仓库**不包含** Folia 的源码树。对 Folia 的修改以补丁形式提供：
+
+      tools/folia-local-changes.patch
+
+  该补丁基于上游提交 6a27d43，内容是给「模组音源（omni.providers）」补齐上游写死为
+  不支持的能力：账号登录、用户歌单、收藏专辑、电台推荐、搜索歌单，以及一处安装包内嵌模组的
+  打包配置。逐项目的、冲突面与「如何还给上游」的说明见：
+
+      folia-本地改动清单.md
+
+  按 AGPL-3.0 的要求，凡分发包含 Folia 代码或其二进制产物的版本（包括本仓库 Release 中的
+  `Folia-Setup-*.exe`，以及用 `tools/build-installer.mjs` 生成的 `win-unpacked` 目录），
+  对应源码即为：本仓库 + 上述上游仓库（补丁基点在其提交信息中），两者合起来构成完整的对应源码。
+
+2. 模组本体与音源库（本仓库原创部分）
+-------------------------------------
+
+  路径：folia/mods/bodian-source/、any-listen/
+  许可：AGPL-3.0（与上游保持一致，避免分发时的许可混用）
+
+  `any-listen/` 是波点接口的客户端库（TypeScript 源码）；模组通过
+  `tools/sync-bodian-vendor.mjs` 将其 CJS 产物 vendored 进自己的 `vendor/` 目录
+  （模组规范允许自带库）。
+
+3. 第三方依赖
+-------------
+
+  模组运行期依赖 qrcode / dijkstrajs / pngjs（MIT），不随源码入库，由
+  `tools/sync-mod-deps.mjs` 从 folia/node_modules 同步，或 `tools/pack-mod.mjs` 打包时一并放入 zip。
+
+4. 非关联声明
+-------------
+
+  本项目为个人自用项目，与 Folia、波点音乐（cn.wenyu.bodian）、酷我音乐（Kuwo）及其运营方
+  均无任何关联，未获其授权或认可。仓库内不含任何音频内容，不提供解密或转存能力。

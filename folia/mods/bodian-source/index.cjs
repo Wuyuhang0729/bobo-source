@@ -47,13 +47,39 @@ const { describeFailure, formatFailure } = require('./lib/errors.cjs');
 const nodeHttpRequest = http.request;
 const nodeHttpsRequest = https.request;
 
-/** Folia 的音质档位 → 波点档位。 */
-const QUALITY_BY_FOLIA = {
-    standard: '128k',
-    high: '320k',
-    lossless: 'flac',
-    hires: 'flac', // 该账号无真 hires，兜到无损
-};
+/**
+ * 是否允许「车机通道」取址（`nmobi.kuwo.cn/mobi.s?type=convert_url_with_sign`）。
+ *
+ * 默认 **关闭**。那条通道**不需要登录**就能拿到整曲（实测普通歌直接给完整 FLAC），而官方给
+ * 匿名身份的只有 29 秒试听 —— 公开分发这个模组时，它是最容易被认定为「提供规避手段」的一处。
+ *
+ * 关掉之后：
+ *   - 已登录 → 用**自己账号的权益**取址（`checkRight` → `audioUrl`，实测 320k/128k mp3 全曲、Range 可用）
+ *   - 未登录 → 官方试听片段（`checkRight` 的 audition，官方给匿名的能力）
+ *
+ * 代价是失去无损 FLAC。仅自用、且清楚自己要什么时才改成 true。
+ */
+const ALLOW_CAR_CHANNEL = false;
+
+/**
+ * Folia 的音质档位 → 波点档位。
+ *
+ * 账号通道拿不到无损（实测 flac 请求会被服务端降级成 320k），所以关掉车机通道时无损/高解析按
+ * 320k 请求 —— 免得界面显示"无损"、实际拿到的是 320k。
+ */
+const QUALITY_BY_FOLIA = ALLOW_CAR_CHANNEL
+    ? {
+        standard: '128k',
+        high: '320k',
+        lossless: 'flac',
+        hires: 'flac', // 该账号无真 hires，兜到无损
+    }
+    : {
+        standard: '128k',
+        high: '320k',
+        lossless: '320k', // 账号通道上限
+        hires: '320k',
+    };
 
 /** 波点播放地址带时效，保守按 30 分钟记。 */
 const URL_TTL_MS = 30 * 60 * 1000;
@@ -363,15 +389,26 @@ module.exports = function activate(api) {
         : url);
 
     // ------------------------------------------------------------ 播放地址
+    //
+    // 三条取址路径，默认只走"自己账号"那条：
+    //   1) 账号通道 client.getAccountUrl —— 登录后用自己账号的权益（320k/128k mp3 全曲，Range 可用）
+    //   2) 官方试听 client.getPreviewUrl —— 未登录时的 29 秒片段（官方给匿名的能力）
+    //   3) 车机通道 client.getMusicUrl  —— 匿名即可拿整曲甚至 FLAC，**默认关闭**（见 ALLOW_CAR_CHANNEL）
     api.rpc.handle('bodian.getAudioUrl', async (song, quality) => {
-        const target = QUALITY_BY_FOLIA[quality] || 'flac';
+        const target = QUALITY_BY_FOLIA[quality] || '320k';
         const id = String(song && song.id);
 
         try {
-            const result = await client.getMusicUrl(id, { quality: target });
+            const result = ALLOW_CAR_CHANNEL
+                ? await client.getMusicUrl(id, { quality: target })
+                : (auth.token
+                    ? await client.getAccountUrl(id, { quality: target })
+                    : await client.getPreviewUrl(id));
             api.log.info(
                 `[bodian] getAudioUrl ${id} 请求=${target} 实得=${result.quality}/${result.format} ` +
-                `时长=${result.duration}s 通道=${result.via}${audioProxyPort ? ' → 本地代理' : '（未代理！）'}`
+                `时长=${result.duration}s 通道=${result.via}` +
+                `${result.restricted ? '（官方试听片段）' : ''}` +
+                `${audioProxyPort ? ' → 本地代理' : '（未代理！）'}`
             );
             return { url: proxied(result.url), expiresAt: Date.now() + URL_TTL_MS };
         } catch (error) {

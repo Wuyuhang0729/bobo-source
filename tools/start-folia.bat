@@ -26,9 +26,10 @@ rem  [Mod:bodian-source] log reachable at tools\out\folia.log.
 rem ============================================================
 title Folia
 
-set "FOLIA_DIR=G:\BoDianBoFangQi\folia"
-set "OUT_DIR=G:\BoDianBoFangQi\tools\out"
 set "TOOLS_DIR=%~dp0"
+rem 相对本脚本定位，换机后不用改路径（%~dp0 自带结尾反斜杠）
+set "FOLIA_DIR=%TOOLS_DIR%..\folia"
+set "OUT_DIR=%TOOLS_DIR%out"
 
 if not exist "%FOLIA_DIR%\package.json" (
     echo [ERROR] Folia directory not found: %FOLIA_DIR%

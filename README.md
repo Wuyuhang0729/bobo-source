@@ -4,9 +4,20 @@
 
 把「波点音乐」接成 [Folia](https://github.com/chthollyphile/folia-major) 的在线音源。
 
-另附一份**宿主侧补丁**：上游的模组接口把「登录 / 歌单 / 专辑 / 电台 / 搜歌单」写死为不支持，
-所以这几项得在宿主侧补齐 —— 补丁与改动说明见
-[`folia-本地改动清单.md`](folia-本地改动清单.md)。
+> **它需要一份宿主补丁才能完整工作。** 上游 Folia 把模组音源的
+> `auth` / `userLibrary` / `albums` / `recommendations` 一律写死为 `false`，也不转发对应接口，
+> 所以**官方版 Folia 上这个模组只能搜歌、播歌、看歌词**。补丁与逐项说明见
+> [`folia-本地改动清单.md`](folia-本地改动清单.md)。
+
+## 先选一个
+
+| 你想要的 | 用什么 | 能拿到 |
+|---|---|---|
+| **只是想听歌**（推荐） | Release 里的 `Folia-Setup-<版本>.exe` | 全部功能 |
+| 已有官方 Folia，想加这个音源 | ⚠️ 光拖 zip **不够** | 只有搜索 / 播放 / 歌词；登录、歌单、专辑、电台、搜歌单都用不了 |
+| 想自己构建、改代码 | 源码 + 补丁（[从源码构建](#从源码构建)） | 全部功能 |
+
+全部功能 = 搜索（歌曲 + 歌单）、播放、逐字歌词、扫码登录、我的歌单、收藏专辑、电台（私人 FM / 每日推荐 / 推荐歌单）。
 
 ## 功能
 
@@ -23,11 +34,11 @@
 
 | 你的情况 | 做法 |
 |---|---|
-| 已经有 Folia | 从 [Releases](https://github.com/Wuyuhang0729/bobo-source/releases) 下载 `bodian-source-<版本>.zip`，拖进「设置 → 系统 → 模组」面板 |
 | 想要开箱即用 | 下载 `Folia-Setup-<版本>.exe` 安装（里面已经带了这个音源） |
-| 想改代码 | 见下方「从源码构建」 |
+| 已经有**打过补丁**的 Folia | 下载 `bodian-source-<版本>.zip`，拖进「设置 → 系统 → 模组」面板 |
+| 只有官方 Folia | 要么改用上面的安装包，要么按[从源码构建](#从源码构建)自己打补丁 |
 
-> 首次使用需要在「设置 → 系统 → 模组」里**确认启用一次**（模组拥有应用完整权限，宿主要求逐个模块确认）。
+首次使用需要在「设置 → 系统 → 模组」里**确认启用一次**（模组以应用完整权限运行，宿主要求逐个模块确认）。
 
 ## 音质
 
@@ -51,10 +62,10 @@ cd BoDianBoFangQi
 # 1) 音源核心库 → 供模组 vendored 使用
 cd any-listen; npm install; npm run build:cjs; cd ..
 
-# 2) 上游 Folia + 宿主侧补丁
+# 2) 上游 Folia + 宿主侧补丁（也可以直接用 tools/apply-patch.ps1 一键做这步）
 git clone https://github.com/chthollyphile/folia-major folia
 cd folia; npm install
-git am ../tools/folia-local-changes.patch     # 补丁基于上游 6a27d43；上游前进后用 git apply -3
+git am ../tools/folia-local-changes.patch     # 补丁基于上游 6a27d43
 cd ..
 
 # 3) 把库产物与运行期依赖同步进模组
@@ -69,6 +80,31 @@ node tools/build-installer.mjs --dry-run   # 先看会做什么
 node tools/build-installer.mjs             # 产物在 folia/release/
 ```
 
+### 补丁打不上怎么办
+
+上游一旦前进，`git am` 就可能失败（补丁钉在上游 `6a27d43`）：
+
+```powershell
+# 用三方合并再试一次（多数情况能过）
+git am --abort
+git apply -3 ../tools/folia-local-changes.patch
+
+# 仍失败：按冲突文件逐处合并。补丁是按能力分项的，
+# 某一项处理不了就把它注释掉，不影响其它能力 —— 见 folia-本地改动清单.md 的「依赖矩阵」
+git status          # 看冲突文件
+```
+
+`tools/apply-patch.ps1` 会把上面这套（clone + am + 失败回退 + 冲突清单）自动跑一遍。
+
+## 兼容性
+
+| 组件 | 当前 | 备注 |
+|---|---|---|
+| 模组 | **0.3.0** | `folia/mods/bodian-source/mod.json`，独立版本号 |
+| 宿主补丁 | 基于上游 `6a27d43` | `tools/folia-local-changes.patch`（3 个提交） |
+| 内嵌 Folia | **0.7.11** | 上游版本号，与模组版本无关 |
+| Folium 模组平台 | 1 | `mod.json` 的 `folium: 1` |
+
 ## 目录结构
 
 | 路径 | 说明 |
@@ -79,7 +115,9 @@ node tools/build-installer.mjs             # 产物在 folia/release/
 | `tools/` | 启动 / 自检 / 打包脚本 |
 | `folia-接入方案.md`、`folia-本地改动清单.md` | 接入调研，以及「改了什么、怎么还给上游」的对照清单 |
 
-## 自检与排查
+## 排查
+
+### 源码环境
 
 ```powershell
 node tools/doctor.mjs        # 四级自检：vite → CDP 页面 → provider 注册 → 模组状态/重复
@@ -89,6 +127,15 @@ node tools/test-mod.mjs      # 模组单测（字段映射、id 编解码、失�
 
 真机踩过的坑都记在 [`folia/mods/bodian-source/NOTES.md`](folia/mods/bodian-source/NOTES.md)
 （打包版白屏、模组重复导致平台消失、授权记录被清空、EPIPE 打崩主进程…… 都带排查步骤）。
+
+### 装的是安装包时
+
+| 想知道 | 看哪里 |
+|---|---|
+| 模组有没有启用 | `%APPDATA%\Folia\mod-system.json` → `mods.enabled["bodian-source"].enabled` |
+| 登录态在不在 | `%APPDATA%\Folia\mods-data\bodian-source\mod-data.json`（**含 token，别外发**） |
+| 日志 | 默认**不落盘**：先在「设置 → 开发者」里打开日志保存，之后写到 `%APPDATA%\Folia\logs\` |
+| 老是提示「发现新版本」 | 那是 Folia 自己的更新检查，设置里可以关掉 |
 
 ## 说明与免责
 

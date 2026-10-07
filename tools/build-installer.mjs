@@ -58,6 +58,18 @@ const steps = [
             ELECTRON_MIRROR: 'https://npmmirror.com/mirrors/electron/',
         },
     },
+    {
+        // 免安装版：把 win-unpacked 打成 zip（用 Windows 自带的 bsdtar，-a 按扩展名选格式）
+        name: '绿色版打包（win-unpacked → zip）',
+        command: 'tar',
+        args: [
+            '-a', '-c', '-f',
+            path.join(OUT_DIR, `Folia-${foliaPackage.version}-win-unpacked.zip`),
+            '-C', path.join(FOLIA, 'release', 'win-unpacked'),
+            '.',
+        ],
+        cwd: REPO,
+    },
 ];
 
 console.log(`安装包版本（上游 folia/package.json）: ${foliaPackage.version}`);

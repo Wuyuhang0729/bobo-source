@@ -1,6 +1,7 @@
 # bobo-source · 波点音乐音源（Folia 模组）
 
 [![Release](https://img.shields.io/github/v/release/Wuyuhang0729/bobo-source?label=release)](https://github.com/Wuyuhang0729/bobo-source/releases)
+[![test](https://github.com/Wuyuhang0729/bobo-source/actions/workflows/test.yml/badge.svg)](https://github.com/Wuyuhang0729/bobo-source/actions/workflows/test.yml)
 
 把「波点音乐」接成 [Folia](https://github.com/chthollyphile/folia-major) 的在线音源。
 
@@ -14,6 +15,7 @@
 | 你想要的 | 用什么 | 能拿到 |
 |---|---|---|
 | **只是想听歌**（推荐） | Release 里的 `Folia-Setup-<版本>.exe` | 全部功能 |
+| 想要免安装的便携版 | Release 里的 `Folia-<版本>-win-unpacked.zip` | 全部功能，解压即用 |
 | 已有官方 Folia，想加这个音源 | ⚠️ 光拖 zip **不够** | 只有搜索 / 播放 / 歌词；登录、歌单、专辑、电台、搜歌单都用不了 |
 | 想自己构建、改代码 | 源码 + 补丁（[从源码构建](#从源码构建)） | 全部功能 |
 
@@ -35,6 +37,7 @@
 | 你的情况 | 做法 |
 |---|---|
 | 想要开箱即用 | 下载 `Folia-Setup-<版本>.exe` 安装（里面已经带了这个音源） |
+| 想免安装 / 带着走 | 下载 `Folia-<版本>-win-unpacked.zip`，解压到任意目录，双击里面的 `Folia.exe` |
 | 已经有**打过补丁**的 Folia | 下载 `bodian-source-<版本>.zip`，拖进「设置 → 系统 → 模组」面板 |
 | 只有官方 Folia | 要么改用上面的安装包，要么按[从源码构建](#从源码构建)自己打补丁 |
 
@@ -100,7 +103,7 @@ git status          # 看冲突文件
 
 | 组件 | 当前 | 备注 |
 |---|---|---|
-| 模组 | **0.3.0** | `folia/mods/bodian-source/mod.json`，独立版本号 |
+| 模组 | **0.3.1** | `folia/mods/bodian-source/mod.json`，独立版本号 |
 | 宿主补丁 | 基于上游 `6a27d43` | `tools/folia-local-changes.patch`（3 个提交） |
 | 内嵌 Folia | **0.7.11** | 上游版本号，与模组版本无关 |
 | Folium 模组平台 | 1 | `mod.json` 的 `folium: 1` |

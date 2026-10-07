@@ -249,6 +249,61 @@ node tools/pack-mod.mjs      # → tools/out/bodian-source-<version>.zip
 
 **注意**：库只回列表、不回 total，所以 `hasMore` 按"这一页填满了"判断。
 
+## 打包版白屏 —— 构建时必须带 `ELECTRON=true`
+
+症状：双击 `release\win-unpacked\Folia.exe`（或装 Setup 后），窗口**一直停在启动画面**，
+控制台**没有任何报错**，看起来像"打包失败"。
+
+原因：`vite.config.ts` 里 `base: process.env.ELECTRON === 'true' ? './' : '/'`。
+`npm run build`（不带 `ELECTRON`）产出**绝对路径** `/assets/main-*.js`；在 `file://` 协议下它解析成
+`file:///G:/assets/main-*.js`（盘符根，不存在）→ 模块加载失败 → React 从未挂载。
+
+确认方法（CDP 连打包版页面；它的 URL 是 `app.asar/dist/index.html`，不是 `localhost:3000`）：
+
+```js
+document.getElementById('root').children.length                 // 0
+[...document.querySelectorAll('script')].map(s => s.src)        // file:///G:/assets/…
+```
+
+修法：构建步骤带 `ELECTRON=true`（`tools/build-installer.mjs` 已内置，注释里写了原因）。
+上游 `npm run build:electron` 一直带着它，所以官方打包不会遇到 —— **只有自己写打包脚本时才会踩**。
+
+## 两种运行形态（日常用 exe，开发用 bat）
+
+| 形态 | 怎么起 | 特点 |
+|---|---|---|
+| **日常**（像正常软件） | 双击 `release\win-unpacked\Folia.exe`，或装 `release\Folia-Setup-<版本>.exe` | 无命令行窗口、**不开 DevTools**、自带音源（模组在 `resources/mods/`）。代价：是打包快照，改了仓库里的东西要重跑 `node tools/build-installer.mjs` |
+| **开发** | 双击 `tools\start-folia.bat` | vite 热更新；改模组文件只需重启窗口（开发源免重新确认）。DevTools 仍会弹出，但启动脚本随后会自动关掉 |
+
+两者共用 `%APPDATA%\Folia`（登录态、设置、模组授权一致），所以别同时开两个实例。
+
+## 跑打包版会把仓库模组的授权清掉（dev 与 prod 共用一份记录）
+
+现象：为了验证打包版启动一次 `release\win-unpacked\Folia.exe` 之后，**连开发模式**里的波点音源
+也不见了（模组列表显示未启用）。
+
+原因：授权记录在 `%APPDATA%\Folia\mod-system.json`，dev 与打包版**共用同一份**。而打包版里的
+`resources/mods/bodian-source` **不算开发源**（只有未打包运行时、位于仓库 `mods/` 下的那份才算），
+内容摘要一变（例如打包之后又改了 `NOTES.md`），授权就被撤销并落成 `enabled: false, digest: null`。
+之后开发模式**也不会**自动顺延 —— `resolveTrust` 只在 `stored.digest` 非空时才顺延 dev 授权。
+
+修法（等效于"在模组列表里重新启用一次"，但不用点原生弹窗）：用宿主自己的算法算出当前内容的摘要，
+写回记录：
+
+```powershell
+cd folia
+node -e "const {computeModDigest}=require('./electron/modSystem/modDigest.cjs'); process.stdout.write(computeModDigest('mods/bodian-source'))"
+# 把它写进 %APPDATA%\Folia\mod-system.json 的 mods.enabled['bodian-source'].digest，
+# enabled 置 true，重启 Folia
+```
+
+顺带一条自检：打包后对比两个目录的摘要，一致（例如都是 `sha256:eaa437…`）就说明打包版能直接沿用授权，
+否则打包版首次启动仍需确认一次：
+
+```powershell
+node -e "const {computeModDigest}=require('./electron/modSystem/modDigest.cjs'); console.log(computeModDigest('mods/bodian-source') === computeModDigest('release/win-unpacked/resources/mods/bodian-source'))"
+```
+
 ## 工程化工具与约定（出问题先跑 doctor）
 
 三个脚本，都在 `tools/`，零依赖：

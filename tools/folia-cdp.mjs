@@ -19,6 +19,20 @@ const main = async () => {
     const [command, ...args] = process.argv.slice(2);
 
     if (command === 'close-devtools') {
+        if (args.includes('--wait')) {
+            // 启动脚本用：dev 运行时会自动弹出 DevTools，而 vite 首次编译可能要十几秒，
+            // 一次调用往往太早 —— 这里每 4 秒试一次，关掉就退出。
+            for (let attempt = 0; attempt < 8; attempt += 1) {
+                await new Promise((resolve) => setTimeout(resolve, 4000));
+                const closed = await closeDevToolsTargets().catch(() => 0);
+                if (closed > 0) {
+                    console.log(`已关闭 ${closed} 个 DevTools 目标`);
+                    return;
+                }
+            }
+            console.log('等待超时：没找到需要关闭的 DevTools 目标');
+            return;
+        }
         const closed = await closeDevToolsTargets();
         console.log(closed > 0 ? `已关闭 ${closed} 个 DevTools 目标` : '没有需要关闭的 DevTools 目标');
         return;

@@ -39,6 +39,13 @@ const steps = [
         args: ['run', 'build'],
         cwd: FOLIA,
         shell: true,
+        // ELECTRON=true 是关键，不是可选项：vite.config 里
+        //   base: process.env.ELECTRON === 'true' ? './' : '/'
+        // 少它的话产物引用 `/assets/…`，在 file:// 下会解析成 `file:///G:/assets/…`（不存在）
+        // —— 打包版窗口停在启动画面，控制台还没有任何报错，很容易误判成"打包失败"。
+        // 上游 build:electron 同样带上它（还会构建 windowtolayer / wallpaper-helper，
+        // 那两个需要额外工具链，这里不做；Windows 主功能不依赖它们）。
+        env: { ELECTRON: 'true', ELECTRON_DEV: 'false' },
     },
     {
         name: 'electron-builder 出 NSIS 安装包',

@@ -28,6 +28,7 @@ title Folia
 
 set "FOLIA_DIR=G:\BoDianBoFangQi\folia"
 set "OUT_DIR=G:\BoDianBoFangQi\tools\out"
+set "TOOLS_DIR=%~dp0"
 
 if not exist "%FOLIA_DIR%\package.json" (
     echo [ERROR] Folia directory not found: %FOLIA_DIR%
@@ -70,9 +71,10 @@ echo   log: %OUT_DIR%\folia.log
 set ELECTRON_DEV=true
 start "folia-electron" /min powershell -NoProfile -Command "Start-Process -FilePath 'node_modules\electron\dist\electron.exe' -WorkingDirectory '%FOLIA_DIR%' -ArgumentList '.','--remote-debugging-port=9444' -RedirectStandardOutput '%OUT_DIR%\folia.log' -RedirectStandardError '%OUT_DIR%\folia.err.log'"
 
+rem dev 运行时会自动弹出 DevTools（那是给排查用的）。这里让它就绪后自己关掉，省得每次手点。
+start "folia-close-devtools" /min cmd /c "node %TOOLS_DIR%folia-cdp.mjs close-devtools --wait"
+
 echo.
-echo DevTools opens on purpose in this mode; close it with:
-echo   curl http://127.0.0.1:9444/json/list   (then /json/close/^<id^>)
 echo This window can be closed.
 ping -n 4 127.0.0.1 >nul
 exit /b 0

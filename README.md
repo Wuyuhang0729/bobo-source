@@ -17,7 +17,7 @@
 | **只是想听歌**（推荐） | Release 里的 `Folia-Setup-<版本>.exe` | 全部功能 |
 | 想要免安装的便携版 | Release 里的 `Folia-<版本>-win-unpacked.zip` | 全部功能，解压即用 |
 | 已有官方 Folia，想加这个音源 | ⚠️ 光拖 zip **不够** | 只有搜索 / 播放 / 歌词；登录、歌单、专辑、电台、搜歌单都用不了 |
-| 想自己构建、改代码 | 源码 + 补丁（[从源码构建](#从源码构建)） | 全部功能 |
+| **想自己构建 / 改代码** | 用[带补丁的 Folia fork](https://github.com/Wuyuhang0729/folia-major) | 全部功能（fork 的默认分支就是打过补丁的，clone 即可） |
 
 全部功能 = 搜索（歌曲 + 歌单）、播放、逐字歌词、扫码登录、我的歌单、收藏专辑、电台（私人 FM / 每日推荐 / 推荐歌单）。
 
@@ -56,7 +56,8 @@
 
 ## 从源码构建
 
-本仓库**不含** Folia 本体（上游是独立仓库），需要自己拉一份并应用补丁：
+Folia 本体用**已经带补丁的 fork**（[`Wuyuhang0729/folia-major`](https://github.com/Wuyuhang0729/folia-major)，
+默认分支 `bobo-source` 就是「上游 + 本仓库的补丁」），所以不用再手工 `git am`：
 
 ```powershell
 git clone https://github.com/Wuyuhang0729/bobo-source.git BoDianBoFangQi
@@ -65,11 +66,9 @@ cd BoDianBoFangQi
 # 1) 音源核心库 → 供模组 vendored 使用
 cd any-listen; npm install; npm run build:cjs; cd ..
 
-# 2) 上游 Folia + 宿主侧补丁（也可以直接用 tools/apply-patch.ps1 一键做这步）
-git clone https://github.com/chthollyphile/folia-major folia
-cd folia; npm install
-git am ../tools/folia-local-changes.patch     # 补丁基于上游 6a27d43
-cd ..
+# 2) Folia 本体（默认分支已含宿主补丁）
+git clone https://github.com/Wuyuhang0729/folia-major.git folia
+cd folia; npm install; cd ..
 
 # 3) 把库产物与运行期依赖同步进模组
 node tools/sync-bodian-vendor.mjs
@@ -80,31 +79,40 @@ tools\start-folia.bat
 
 # 或者出安装包 / 免安装版
 node tools/build-installer.mjs --dry-run   # 先看会做什么
-node tools/build-installer.mjs             # 产物在 folia/release/
+node tools/build-installer.mjs             # 产物在 folia/release/ 与 tools/out/
 ```
 
-### 补丁打不上怎么办
+### 跟进上游更新
 
-上游一旦前进，`git am` 就可能失败（补丁钉在上游 `6a27d43`）：
+那个 fork 的 `bobo-source` 分支 = 上游 `main` + 本仓库的 3 个补丁提交。上游有更新时：
 
 ```powershell
-# 用三方合并再试一次（多数情况能过）
-git am --abort
-git apply -3 ../tools/folia-local-changes.patch
-
-# 仍失败：按冲突文件逐处合并。补丁是按能力分项的，
-# 某一项处理不了就把它注释掉，不影响其它能力 —— 见 folia-本地改动清单.md 的「依赖矩阵」
-git status          # 看冲突文件
+cd folia
+git remote add upstream https://github.com/chthollyphile/folia-major.git   # 只需一次
+git fetch upstream main
+git merge upstream/main     # 冲突时按 folia-本地改动清单.md 的「依赖矩阵」分项处理
 ```
 
-`tools/apply-patch.ps1` 会把上面这套（clone + am + 失败回退 + 冲突清单）自动跑一遍。
+### 补丁本身在本仓库（备选做法）
+
+不想用 fork、或想基于自己那份 Folia 时，补丁也可以单独应用：
+
+```powershell
+node tools/apply-patch.ps1            # 自动 clone 上游 + git am（失败回退 git apply -3）
+# 或者手工：
+git clone https://github.com/chthollyphile/folia-major folia
+cd folia; git am ../tools/folia-local-changes.patch
+```
+
+补丁基于上游 `6a27d43`（`git am` 失败时用 `git apply -3` 做三方合并）。
 
 ## 兼容性
 
 | 组件 | 当前 | 备注 |
 |---|---|---|
 | 模组 | **0.3.1** | `folia/mods/bodian-source/mod.json`，独立版本号 |
-| 宿主补丁 | 基于上游 `6a27d43` | `tools/folia-local-changes.patch`（3 个提交） |
+| 宿主源码（推荐） | fork 的 `bobo-source` 分支 | [Wuyuhang0729/folia-major](https://github.com/Wuyuhang0729/folia-major) = 上游 `6a27d43` + 3 个补丁提交，可用 `git merge upstream/main` 跟进上游 |
+| 宿主补丁（备选） | 基于上游 `6a27d43` | `tools/folia-local-changes.patch`（3 个提交） |
 | 内嵌 Folia | **0.7.11** | 上游版本号，与模组版本无关 |
 | Folium 模组平台 | 1 | `mod.json` 的 `folium: 1` |
 

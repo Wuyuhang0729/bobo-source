@@ -76,6 +76,22 @@ console.log(`安装包版本（上游 folia/package.json）: ${foliaPackage.vers
 console.log(`内嵌模组版本（mod.json）:             ${modManifest.version}`);
 console.log('');
 
+// 打包前自检：正在运行的 Folia/eletron 会占住 release/win-unpacked 里的 dll，
+// electron-builder 替换文件时报 EPERM: operation not permitted, unlink '...d3dcompiler_47.dll'
+// —— 报错信息完全不提"进程占用"，很容易误判成权限问题或磁盘问题，所以在这里先拦一道。
+if (process.platform === 'win32') {
+    const running = ['Folia.exe', 'electron.exe'].filter((image) => {
+        const out = spawnSync('tasklist', ['/NH', '/FI', `IMAGENAME eq ${image}`], { encoding: 'utf8' }).stdout || '';
+        return out.toLowerCase().includes(image.toLowerCase());
+    });
+    if (running.length > 0) {
+        console.error(`✗ 检测到 ${running.join(' / ')} 正在运行 —— 请先关闭 Folia（含开发模式窗口）再打包。`);
+        console.error('  否则 electron-builder 会因文件占用失败，报错形如：');
+        console.error("  EPERM: operation not permitted, unlink '...\\release\\win-unpacked\\d3dcompiler_47.dll'");
+        process.exit(1);
+    }
+}
+
 if (DRY_RUN) {
     steps.forEach((step, index) => {
         console.log(`[${index + 1}/${steps.length}] ${step.name}`);

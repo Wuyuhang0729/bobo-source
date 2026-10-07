@@ -48,7 +48,7 @@
 本仓库**不含** Folia 本体（上游是独立仓库），需要自己拉一份并应用补丁：
 
 ```powershell
-git clone <本仓库> BoDianBoFangQi
+git clone https://github.com/Wuyuhang0729/bobo-source.git BoDianBoFangQi
 cd BoDianBoFangQi
 
 # 1) 音源核心库 → 供模组 vendored 使用

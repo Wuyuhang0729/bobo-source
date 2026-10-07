@@ -1,17 +1,23 @@
-# 让换行符在跨平台 clone 时保持不变：
-#   - patch 与 .sh 不能被 CRLF 污染（否则 git am / bash 会失败）
-#   - Windows 批处理必须是 CRLF
-#   - 其余文本交给 git 自动判定
-* text=auto
+# 换行符策略 —— 只针对真正需要固定的文件，不写 `* text=auto`。
+#
+# 为什么不写全量规则：那会在 Git 下次触碰时把工作区文件整体改成 CRLF，而模组目录
+# （folia/mods/bodian-source/）的内容摘要包含每个文件的内容 —— 换行符一变，摘要就变，
+# 已经打包好的版本会被判为「内容变化」而要求重新确认。
+#
+# 注意：这里只能整行注释，gitattributes 不支持行尾注释。
+#
+# *.patch 必须保持原样，否则 git am 会失败。
 *.patch -text
 *.sh text eol=lf
+# Windows 批处理需要 CRLF
 *.bat text eol=crlf
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
 
-# 二进制
+# 二进制，避免被当成文本处理
 *.png binary
 *.jpg binary
+*.jpeg binary
 *.ico binary
 *.exe binary
 *.zip binary

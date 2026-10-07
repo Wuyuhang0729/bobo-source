@@ -12,9 +12,12 @@
 
 ## 先选一个
 
+> [!TIP]
+> 多数人只需要**第一个** —— 下载 `Folia-Setup-<版本>.exe`，装完就能用。
+
 | 你想要的 | 用什么 | 能拿到 |
 |---|---|---|
-| **只是想听歌**（推荐） | Release 里的 `Folia-Setup-<版本>.exe` | 全部功能 |
+| ⭐ **只是想听歌（推荐）** | Release 里的 `Folia-Setup-<版本>.exe` | 全部功能 |
 | 想要免安装的便携版 | Release 里的 `Folia-<版本>-win-unpacked.zip` | 全部功能，解压即用 |
 | 已有官方 Folia，想加这个音源 | ⚠️ 光拖 zip **不够** | 只有搜索 / 播放 / 歌词；登录、歌单、专辑、电台、搜歌单都用不了 |
 | **想自己构建 / 改代码** | 用[带补丁的 Folia fork](https://github.com/Wuyuhang0729/folia-major) | 全部功能（fork 的默认分支就是打过补丁的，clone 即可） |

@@ -5,10 +5,6 @@
 
 把「波点音乐」接成 [Folia](https://github.com/chthollyphile/folia-major) 的在线音源。
 
-> [!IMPORTANT]
-> **它需要一份宿主补丁才能完整工作**：上游 Folia 把模组音源的 `auth` / `userLibrary` / `albums` /
-> `recommendations` 写死为 `false` 且不转发接口，所以**官方原版 Folia 上只能搜歌、播歌、看歌词**。
-> 补丁与逐项说明见 [`folia-本地改动清单.md`](folia-本地改动清单.md)。
 
 ## 🧭 先选一个
 
@@ -92,6 +88,10 @@ node tools/build-installer.mjs                                           # 出�
 跟进上游更新：`cd folia; git remote add upstream https://github.com/chthollyphile/folia-major.git; git fetch upstream main; git merge upstream/main`
 （冲突按 `folia-本地改动清单.md` 的依赖矩阵分项处理）。
 不想用 fork、或想基于自己那份 Folia：`node tools/apply-patch.ps1`（补丁基于上游 `6a27d43`，失败回退 `git apply -3`）。
+> [!IMPORTANT]
+> **它需要一份宿主补丁才能完整工作**：上游 Folia 把模组音源的 `auth` / `userLibrary` / `albums` /
+> `recommendations` 写死为 `false` 且不转发接口，所以**官方原版 Folia 上只能搜歌、播歌、看歌词**。
+> 补丁与逐项说明见 [`folia-本地改动清单.md`](folia-本地改动清单.md)。
 
 ## 🧩 版本
 

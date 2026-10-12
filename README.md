@@ -1,5 +1,6 @@
 # bobo-source · 波点音乐音源（Folia 模组）
 
+>视频演示：【波点音乐音源（Folia 模组）】 https://www.bilibili.com/video/BV17Ppo6jEoC/?share_source=copy_web&vd_source=2d30b54e563ec0adbfe66c4339183dc6
 [![Release](https://img.shields.io/github/v/release/Wuyuhang0729/bobo-source?label=release)](https://github.com/Wuyuhang0729/bobo-source/releases)
 [![test](https://github.com/Wuyuhang0729/bobo-source/actions/workflows/test.yml/badge.svg)](https://github.com/Wuyuhang0729/bobo-source/actions/workflows/test.yml)
 

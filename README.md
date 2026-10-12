@@ -10,11 +10,14 @@
 > `recommendations` 写死为 `false` 且不转发接口，所以**官方原版 Folia 上只能搜歌、播歌、看歌词**。
 > 补丁与逐项说明见 [`folia-本地改动清单.md`](folia-本地改动清单.md)。
 
-## 🧭 选择安装方式
+## ▶️ 视频演示
+【波点音乐音源（Folia 模组）】
+https://www.bilibili.com/video/BV17Ppo6jEoC
 
+## 🧭 选择安装方式
 > [!TIP]
 > 多数人只要**第一个** —— 装完就是「波点音乐版 Folia」，补丁已经在里面了。
->视频演示：【波点音乐音源（Folia 模组）】 https://www.bilibili.com/video/BV17Ppo6jEoC/?share_source=copy_web&vd_source=2d30b54e563ec0adbfe66c4339183dc6
+> 
 | 你想要的 | 用什么 | 能拿到 |
 |---|---|---|
 | ⭐ **推荐** | [下载 `Folia-Setup-<版本>.exe`](https://github.com/Wuyuhang0729/bobo-source/releases/latest)（附件里最大的那个） | 全部功能 |

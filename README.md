@@ -10,15 +10,15 @@
 > `recommendations` 写死为 `false` 且不转发接口，所以**官方原版 Folia 上只能搜歌、播歌、看歌词**。
 > 补丁与逐项说明见 [`folia-本地改动清单.md`](folia-本地改动清单.md)。
 
-## 🧭 先选一个
+## 🧭 选择安装方式
 
 > [!TIP]
 > 多数人只要**第一个** —— 装完就是「波点音乐版 Folia」，补丁已经在里面了。
 
 | 你想要的 | 用什么 | 能拿到 |
 |---|---|---|
-| ⭐ **只是想听歌（推荐）** | [下载 `Folia-Setup-<版本>.exe`](https://github.com/Wuyuhang0729/bobo-source/releases/latest)（附件里最大的那个） | 全部功能 |
-| 免安装便携版 | [下载 `Folia-<版本>-win-unpacked.zip`](https://github.com/Wuyuhang0729/bobo-source/releases/latest) | 全部功能，解压即用 |
+| ⭐ **推荐）** | [下载 `Folia-Setup-<版本>.exe`](https://github.com/Wuyuhang0729/bobo-source/releases/latest)（附件里最大的那个） | 全部功能 |
+| 解压版 | [下载 `Folia-<版本>-win-unpacked.zip`](https://github.com/Wuyuhang0729/bobo-source/releases/latest) | 全部功能，解压即用 |
 | 已有**打过补丁**的 Folia | `bodian-source-<版本>.zip`，拖进模组面板 | 全部功能 |
 | 只有官方原版 Folia | ⚠️ 光拖 zip 不够 | 只有搜索 / 播放 / 歌词 |
 | 想自己构建 / 改代码 | [带补丁的 Folia fork](https://github.com/Wuyuhang0729/folia-major) | 全部功能，clone 即可 |

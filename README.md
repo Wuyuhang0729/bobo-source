@@ -122,5 +122,5 @@ node tools/test-mod.mjs      # 模组单测
 
 - 非官方项目：与 Folia、波点音乐、酷我及其运营方均无关联。
 - 仓库**不含音频内容**：不解密 DRM、不转存、不导出，只解析播放地址交给播放器；登录凭据由使用者自己扫码获得，只存在本机。
-- 使用本项目会**违反平台用户协议**，请自行判断并承担风险；作者不对后果负责，权利人提出异议即配合下线。条款原文与判例见 [docs/合规调研.md](docs/合规调研.md)。
+- 仅供个人学习研究使用；请在符合你所在平台服务条款的前提下使用，风险自负。作者不对使用后果负责，权利人提出异议即配合下线。条款原文与判例整理见 [docs/合规调研.md](docs/合规调研.md)。
 - 许可 **AGPL-3.0**：`tools/folia-local-changes.patch` 是对 [Folia](https://github.com/chthollyphile/folia-major)（AGPL-3.0）的修改；含 Folia 二进制的产物按 AGPL-3.0 分发，对应源码 = 本仓库 + 上游仓库。见 [LICENSE](LICENSE)、[NOTICE](NOTICE)。

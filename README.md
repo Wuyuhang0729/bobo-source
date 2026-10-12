@@ -1,6 +1,5 @@
 # bobo-source · 波点音乐音源（Folia 模组）
 
->视频演示：【波点音乐音源（Folia 模组）】 https://www.bilibili.com/video/BV17Ppo6jEoC/?share_source=copy_web&vd_source=2d30b54e563ec0adbfe66c4339183dc6
 [![Release](https://img.shields.io/github/v/release/Wuyuhang0729/bobo-source?label=release)](https://github.com/Wuyuhang0729/bobo-source/releases)
 [![test](https://github.com/Wuyuhang0729/bobo-source/actions/workflows/test.yml/badge.svg)](https://github.com/Wuyuhang0729/bobo-source/actions/workflows/test.yml)
 
@@ -15,7 +14,7 @@
 
 > [!TIP]
 > 多数人只要**第一个** —— 装完就是「波点音乐版 Folia」，补丁已经在里面了。
-
+>视频演示：【波点音乐音源（Folia 模组）】 https://www.bilibili.com/video/BV17Ppo6jEoC/?share_source=copy_web&vd_source=2d30b54e563ec0adbfe66c4339183dc6
 | 你想要的 | 用什么 | 能拿到 |
 |---|---|---|
 | ⭐ **推荐** | [下载 `Folia-Setup-<版本>.exe`](https://github.com/Wuyuhang0729/bobo-source/releases/latest)（附件里最大的那个） | 全部功能 |

@@ -17,7 +17,7 @@
 
 | 你想要的 | 用什么 | 能拿到 |
 |---|---|---|
-| ⭐ **推荐）** | [下载 `Folia-Setup-<版本>.exe`](https://github.com/Wuyuhang0729/bobo-source/releases/latest)（附件里最大的那个） | 全部功能 |
+| ⭐ **推荐** | [下载 `Folia-Setup-<版本>.exe`](https://github.com/Wuyuhang0729/bobo-source/releases/latest)（附件里最大的那个） | 全部功能 |
 | 解压版 | [下载 `Folia-<版本>-win-unpacked.zip`](https://github.com/Wuyuhang0729/bobo-source/releases/latest) | 全部功能，解压即用 |
 | 已有**打过补丁**的 Folia | `bodian-source-<版本>.zip`，拖进模组面板 | 全部功能 |
 | 只有官方原版 Folia | ⚠️ 光拖 zip 不够 | 只有搜索 / 播放 / 歌词 |

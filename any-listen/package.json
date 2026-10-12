@@ -1,0 +1,49 @@
+{
+  "name": "bodian",
+  "version": "0.1.0",
+  "description": "波点音乐(Bodian)音源核心库 - 匿名搜索 / 完整音质播放地址 / 逐字歌词 / 歌单，零运行时依赖",
+  "keywords": [
+    "bodian",
+    "kuwo",
+    "music-source",
+    "lx-music",
+    "any-listen"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "main": "./dist/cjs/src/index.js",
+  "module": "./dist/esm/src/index.js",
+  "types": "./dist/esm/src/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/esm/src/index.d.ts",
+        "default": "./dist/esm/src/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/src/index.d.ts",
+        "default": "./dist/cjs/src/index.js"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "npm run build:esm && npm run build:cjs",
+    "build:esm": "tsc -p tsconfig.esm.json",
+    "build:cjs": "tsc -p tsconfig.cjs.json && node scripts/postbuild-cjs.mjs",
+    "verify": "npm run build && node dist/esm/bin/verify.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.9.0"
+  }
+}

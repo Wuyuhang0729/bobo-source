@@ -1,0 +1,1439 @@
+From c01f15d81432a5033778f08aa6ab23f08bf8fce0 Mon Sep 17 00:00:00 2001
+From: Winter wuyuhang <155148127+2075689219@users.noreply.github.com>
+Date: Fri, 2 Oct 2026 14:50:39 +0800
+Subject: [PATCH 1/3] =?UTF-8?q?feat(mods):=20=E6=A8=A1=E7=BB=84=E9=9F=B3?=
+ =?UTF-8?q?=E6=BA=90=E7=9A=84=E6=9C=AC=E5=9C=B0=E6=89=A9=E5=B1=95=20?=
+ =?UTF-8?q?=E2=80=94=E2=80=94=20=E7=99=BB=E5=BD=95=20/=20=E6=AD=8C?=
+ =?UTF-8?q?=E5=8D=95=20/=20=E4=B8=93=E8=BE=91=20/=20=E7=94=B5=E5=8F=B0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+上游把模组 provider 的 auth / userLibrary / playlists / userAlbums / recommendations
+一律写死为 false，于是自写的音源在界面里只剩搜索和播放：没有登录入口，没有歌单 / 专辑 /
+电台标签（而搜索又是跟着 tab 走的 —— tab 禁用就永远搜不到这个源）。
+
+本分支（本地自用）把这些补齐，全部标了 LOCAL CHANGE (bodian-source)：
+
+- contract.ts
+  * FoliumOmniProviderLibrary.getAlbumTracks：宿主 catalog 对 type==='album' 只问它
+  * getCollectionTracks 增加 providerData 回传、collection 增加 providerData 透传
+  * 新增 FoliumOmniProviderRecommendations 与 def.recommendations（电台 tab 的开关）
+- registries/omniProviders.ts：把上面对接到宿主能力表与适配器
+- hooks：模组 provider 不在内置 refresher 表里，补通用兜底，
+  否则账号状态永远 resolving、歌单永不刷新
+- Grid3D.tsx / i18n：登录弹窗按 provider 全名取文案
+  （folium.<modid>.<providerId>，写成 folium.bodian 会静默回退网易云文案）
+- package.json：extraResources 带上 mods/bodian-source，
+  安装版开箱即有此音源（在设置 → 系统 → 模组里确认启用一次）
+
+配套模组代码在仓库 folia/mods/bodian-source（根仓库跟踪），
+换机重放用 tools/folia-local-changes.patch。
+---
+ package.json                                |   7 +
+ src/components/Grid3D.tsx                   |   5 +
+ src/hooks/useHomeProviderRefresh.ts         |   7 +
+ src/hooks/useOnlineProviderPlatform.ts      |  77 ++++++++--
+ src/i18n/locales/en.ts                      |   2 +
+ src/i18n/locales/in.ts                      |   2 +
+ src/i18n/locales/zh-CN.ts                   |   2 +
+ src/mods/folium/contract.ts                 | 139 ++++++++++++++++++
+ src/mods/folium/registries/omniProviders.ts | 152 ++++++++++++++++++--
+ 9 files changed, 376 insertions(+), 17 deletions(-)
+
+diff --git a/package.json b/package.json
+index c9b5d4e..333f45d 100644
+--- a/package.json
++++ b/package.json
+@@ -96,6 +96,13 @@
+         "from": "build/ffmpeg/${os}-${arch}",
+         "to": "ffmpeg-audio"
+       },
++      {
++        "from": "mods",
++        "to": "mods",
++        "filter": [
++          "bodian-source/**/*"
++        ]
++      },
+       {
+         "from": "build/icon.png",
+         "to": "icon.png"
+diff --git a/src/components/Grid3D.tsx b/src/components/Grid3D.tsx
+index b733539..236db9c 100644
+--- a/src/components/Grid3D.tsx
++++ b/src/components/Grid3D.tsx
+@@ -41,9 +41,14 @@ import { countRender } from '../dev/renderCount';
+ // Supports cover sliding with auto-fading header controls and delegates GridView opening upward.
+ 
+ // Each provider scans from its own app, so the modal copy is keyed here instead of nested in the JSX.
++// Mod-provided sources are hosted under `folium.<modid>.<providerId>` (foliumProviderId() in
++// folium/registries/omniProviders.ts) — for the bodian-source mod that key is
++// `folium.bodian-source.bodian`. NOTE: the runtime providerId is only used for indexing; the bare
++// `folium.bodian` will NOT match and silently falls back to NETEASE_LOGIN_COPY.
+ const LOGIN_COPY_BY_PROVIDER: Record<string, { title: string; note: string }> = {
+     kugou: { title: 'home.loginTitleKugou', note: 'home.loginNoteKugou' },
+     qq: { title: 'home.loginTitleQq', note: 'home.loginNoteQq' },
++    'folium.bodian-source.bodian': { title: 'home.loginTitleBodian', note: 'home.loginNoteBodian' },
+ };
+ const NETEASE_LOGIN_COPY = { title: 'home.loginTitle', note: 'home.loginNote' };
+ 
+diff --git a/src/hooks/useHomeProviderRefresh.ts b/src/hooks/useHomeProviderRefresh.ts
+index b3cdda6..8d7a4ae 100644
+--- a/src/hooks/useHomeProviderRefresh.ts
++++ b/src/hooks/useHomeProviderRefresh.ts
+@@ -40,6 +40,12 @@ export const useHomeProviderRefresh = ({
+         if (currentView !== 'home' || hasCollection) return;
+ 
+         const providerId = onlineProviderPlatform.activeProviderId;
++        // 账号还没 hydrate 完就先不动：refreshProviderPlaylists 读的是 account.user.id，
++        // 账号为空时它会立刻 return []，歌单就永远拉不回来。
++        //
++        // 对内置平台这条从来不是问题——各自的 useXxxLibrary hook 会在挂载时先把账号填好；
++        // 模组 provider 的账号是异步查出来的，于是和这里形成了竞态，必须显式等一次。
++        if (!onlineProviderPlatform.activeProvider?.user) return;
+         const startedAt = Date.now();
+         const previous = lastHomeProviderRefreshRef.current;
+         if (previous?.providerId === providerId && startedAt - previous.at <= HOME_PROVIDER_REFRESH_COOLDOWN_MS) return;
+@@ -72,6 +78,7 @@ export const useHomeProviderRefresh = ({
+         currentView,
+         hasCollection,
+         onlineProviderPlatform.activeProvider?.freshness,
++        onlineProviderPlatform.activeProvider?.user,
+         onlineProviderPlatform.activeProviderId,
+         refreshActiveProviderPlaylists,
+         t,
+diff --git a/src/hooks/useOnlineProviderPlatform.ts b/src/hooks/useOnlineProviderPlatform.ts
+index b038c58..858ed33 100644
+--- a/src/hooks/useOnlineProviderPlatform.ts
++++ b/src/hooks/useOnlineProviderPlatform.ts
+@@ -1,7 +1,7 @@
+ import { useCallback, useEffect, useMemo } from 'react';
+ import { useShallow } from 'zustand/react/shallow';
+ import { omni } from '../services/onlineMusic/omni';
+-import { useOnlineProviderAccountStore } from '../stores/useOnlineProviderAccountStore';
++import { useOnlineProviderAccountStore, type OnlineProviderAccountState } from '../stores/useOnlineProviderAccountStore';
+ import type { OnlineProviderId, ProviderAccountSummary } from '../types/onlineMusic';
+ import { useStableCallbacks } from './useStableCallbacks';
+ 
+@@ -84,30 +84,91 @@ export const useOnlineProviderPlatform = (
+     useEffect(() => {
+         if (storedProviderId !== activeProviderId) setActiveProviderId(activeProviderId);
+     }, [activeProviderId, setActiveProviderId, storedProviderId]);
+-    const refreshProvider = useCallback(async (providerId: OnlineProviderId) => {
+-        return await refreshers[providerId]?.();
++    /**
++     * 刷新一个 provider 的账号状态。
++     *
++     * 内置平台（netease / kugou / qq）各有自己的 refresher，写在 App.tsx 的那张表里；
++     * **模组音源不在那张表里**，所以表里查不到时回落到 omni 的通用登录态查询。
++     *
++     * 没有这一步，模组 provider 的 account 会永远停在 status='unknown' /
++     * hydration='loading'，而 resolveOnlineProviderAccountView 把这两个值判成
++     * 'resolving' —— 界面表现就是「一直转圈」且「显示未登录」。
++     */
++    const refreshProviderAccount = useCallback(async (providerId: OnlineProviderId) => {
++        const refresher = refreshers[providerId];
++        if (refresher) return await refresher();
++
++        const { updateAccount } = useOnlineProviderAccountStore.getState();
++        const settle = (patch: Partial<OnlineProviderAccountState>) => updateAccount(providerId, {
++            hydration: 'ready',
++            freshness: 'fresh',
++            ...patch,
++        });
++
++        try {
++            const user = await omni.getLoginStatus(providerId);
++            settle(user
++                ? { status: 'authenticated', user }
++                : { status: 'anonymous', user: null, collections: [] });
++            return user ?? null;
++        } catch {
++            // provider 没有 auth 能力时 omni 抛 unsupported：按「匿名已就绪」处理，
++            // 让它显示成可搜索/可播放的游客态，而不是永远卡在 resolving。
++            settle({ status: 'anonymous', user: null, collections: [] });
++            return null;
++        }
+     }, [refreshers]);
++    /**
++     * 挂载时、以及切换平台时，都刷新一次它的账号状态。
++     *
++     * 内置平台各有自己的 useXxxLibrary hook 在挂载时完成这件事；模组 provider 没有 hook，
++     * 不在这里兜底的话它的 account 会一直是空的 —— 界面上表现为「未登录」，歌单也拉不出来
++     * （refreshProviderPlaylists 先读 account.user.id，拿不到就直接 return []）。
++     */
++    useEffect(() => {
++        void refreshProviderAccount(activeProviderId);
++    }, [activeProviderId, refreshProviderAccount]);
++    const refreshProvider = useCallback(async (providerId: OnlineProviderId) => {
++        return await refreshProviderAccount(providerId);
++    }, [refreshProviderAccount]);
+     const logoutProvider = useCallback(async (providerId: OnlineProviderId) => {
+-        await logouts[providerId]?.();
++        const logout = logouts[providerId];
++        if (logout) {
++            await logout();
++            return;
++        }
++        // 通用兜底：模组 provider 不在内置表里，直接问它的 auth 门面，再把账号状态落到 store。
++        try {
++            await omni.logout(providerId);
++        } catch {
++            // provider 没有 auth 能力时 omni 会抛 unsupported；退出到匿名即可。
++        }
++        useOnlineProviderAccountStore.getState().updateAccount(providerId, {
++            status: 'anonymous',
++            user: null,
++            collections: [],
++            hydration: 'ready',
++            freshness: 'fresh',
++        });
+     }, [logouts]);
+     const switchProvider = useCallback((providerId: OnlineProviderId) => switchOnlineProviderTransaction({
+         currentProviderId: activeProviderId,
+         nextProviderId: providerId,
+         prepare: prepareSwitch,
+         commit: setActiveProviderId,
+-        refresh: refreshers[providerId],
+-    }), [activeProviderId, prepareSwitch, refreshers, setActiveProviderId]);
++        refresh: () => refreshProviderAccount(providerId),
++    }), [activeProviderId, prepareSwitch, refreshProviderAccount, setActiveProviderId]);
+     const completeLogin = useCallback((providerId: OnlineProviderId) => completeOnlineProviderLoginTransaction({
+         currentProviderId: activeProviderId,
+         loginProviderId: providerId,
+-        refresh: async () => await refreshers[providerId]?.(),
++        refresh: async () => await refreshProviderAccount(providerId),
+         activate: () => switchOnlineProviderTransaction({
+             currentProviderId: activeProviderId,
+             nextProviderId: providerId,
+             prepare: prepareSwitch,
+             commit: setActiveProviderId,
+         }),
+-    }), [activeProviderId, prepareSwitch, refreshers, setActiveProviderId]);
++    }), [activeProviderId, prepareSwitch, refreshProviderAccount, setActiveProviderId]);
+ 
+     const activeProvider = providers.find(provider => provider.providerId === activeProviderId) || providers[0];
+     // The whole object is a dependency of buildHomeModel, so unlike the other hooks here it is not
+diff --git a/src/i18n/locales/en.ts b/src/i18n/locales/en.ts
+index a53c7f7..f3de2dd 100644
+--- a/src/i18n/locales/en.ts
++++ b/src/i18n/locales/en.ts
+@@ -1014,6 +1014,8 @@ export default {
+     "loginNote": "Open Netease Music App > Discover > Scan QR",
+     "loginTitleKugou": "Scan with KuGou Music",
+     "loginNoteKugou": "Open KuGou Music and scan this QR code",
++    "loginTitleBodian": "Scan with Bodian Music",
++    "loginNoteBodian": "Open Bodian Music and use its scanner to sign in",
+     "loginTitleQq": "Scan to sign in to QQ Music",
+     "loginNoteQq": "Choose the sign-in method matching your account: QQ scan or WeChat scan",
+     "qqLoginMethodTitle": "Choose sign-in method",
+diff --git a/src/i18n/locales/in.ts b/src/i18n/locales/in.ts
+index b19fc96..b645eda 100644
+--- a/src/i18n/locales/in.ts
++++ b/src/i18n/locales/in.ts
+@@ -1009,6 +1009,8 @@ export default {
+     "loginNote": "Buka Aplikasi Netease Music > Discover > Pindai QR",
+     "loginTitleKugou": "Pindai dengan KuGou Music",
+     "loginNoteKugou": "Buka KuGou Music dan pindai kode QR ini",
++    "loginTitleBodian": "Pindai dengan Bodian Music",
++    "loginNoteBodian": "Buka Bodian Music dan gunakan pemindainya untuk masuk",
+     "loginTitleQq": "Pindai untuk masuk ke QQ Music",
+     "loginNoteQq": "Pilih metode masuk yang sesuai: pindai QQ atau pindai WeChat",
+     "qqLoginMethodTitle": "Pilih metode masuk",
+diff --git a/src/i18n/locales/zh-CN.ts b/src/i18n/locales/zh-CN.ts
+index ce9e5b2..894ce9c 100644
+--- a/src/i18n/locales/zh-CN.ts
++++ b/src/i18n/locales/zh-CN.ts
+@@ -1013,6 +1013,8 @@ export default {
+     "loginNote": "打开网易云音乐APP > 发现 > 扫一扫",
+     "loginTitleKugou": "使用酷狗音乐APP扫码",
+     "loginNoteKugou": "打开酷狗音乐APP扫描二维码",
++    "loginTitleBodian": "使用波点音乐APP扫码",
++    "loginNoteBodian": "打开波点音乐APP，用扫一扫登录",
+     "loginTitleQq": "扫码登录QQ音乐",
+     "loginNoteQq": "请选择与账号一致的登录方式：QQ 扫码或微信扫码",
+     "qqLoginMethodTitle": "选择登录方式",
+diff --git a/src/mods/folium/contract.ts b/src/mods/folium/contract.ts
+index 2bb7355..174c0a6 100644
+--- a/src/mods/folium/contract.ts
++++ b/src/mods/folium/contract.ts
+@@ -1007,6 +1007,139 @@ export interface FoliumProviderSong {
+ /** Audio quality levels an Omni provider may be asked for. */
+ export type FoliumAudioQuality = 'standard' | 'high' | 'lossless' | 'hires';
+ 
++/**
++ * EXPERIMENTAL (`omni.providers`): the signed-in account as Folium shows it.
++ * `id` is the provider's own user id; keep it stable across logins.
++ */
++export interface FoliumProviderUser {
++    id: string;
++    nickname: string;
++    avatarUrl?: string;
++    backgroundUrl?: string;
++    vipType?: number;
++}
++
++/** EXPERIMENTAL (`omni.providers`): what polling one QR session reports. */
++export type FoliumProviderQrState =
++    | { state: 'waiting' }
++    | { state: 'scanned' }
++    | { state: 'confirmed' }
++    | { state: 'expired' }
++    | { state: 'error'; message?: string };
++
++/**
++ * EXPERIMENTAL (`omni.providers`): account login for a mod provider.
++ *
++ * The host drives a provider-neutral QR flow: `getQrKey()` → `createQr(key)` → poll
++ * `checkQr(key)` until it leaves `waiting`. Return the QR however you like — an https URL
++ * (the host points an <img> at it) or a `data:` URL work equally well.
++ *
++ * Omit `getQrLoginMethods` for a single-step flow (one QR, no method picker), which is what
++ * a provider with a single scan target wants.
++ */
++export interface FoliumOmniProviderAuth {
++    getLoginStatus(): Promise<FoliumProviderUser | null>;
++    logout(): Promise<void>;
++    /** A new session key, opaque to the host. */
++    getQrKey?(): Promise<string>;
++    /** The QR image to show for that key. */
++    createQr?(key: string): Promise<string>;
++    checkQr?(key: string): Promise<FoliumProviderQrState>;
++    /** Must be idempotent: the host calls it fire-and-forget when the modal closes. */
++    cancelQr?(key: string): Promise<void>;
++    /** Declare it and the host times the QR itself; omit to only trust reported expiry. */
++    getQrTtlMs?(): number;
++}
++
++/**
++ * EXPERIMENTAL (`omni.providers`): one collection (playlist / album / radio) a provider exposes.
++ * `type` is free-form; the host routes unknown types to its playlist views.
++ */
++export interface FoliumProviderCollection {
++    /** Collection id within this provider. */
++    id: string;
++    /** Display name. */
++    name: string;
++    /** `playlist` | `album` | `radio` | … Defaults to `playlist`. */
++    type?: string;
++    /** Cover image URL. */
++    coverUrl?: string;
++    /** Shown under the name. */
++    description?: string;
++    /** Track count, when known. */
++    trackCount?: number;
++    /** Play count, when known. */
++    playCount?: number;
++    /** Created by the signed-in user (as opposed to merely collected). */
++    isOwned?: boolean;
++    /** Creator display name. */
++    creatorName?: string;
++    /**
++     * Opaque per-provider extras, forwarded to the host collection untouched.
++     *
++     * LOCAL CHANGE (bodian-source): the mod needs this to remember which upstream catalog an id
++     * came from — Bodian's playlists live behind `source` values that are not derivable from the
++     * id alone, so `getCollectionTracks` has to read it back when a collection is opened.
++     */
++    providerData?: Record<string, unknown>;
++}
++
++/**
++ * EXPERIMENTAL (`omni.providers`): the signed-in user's library.
++ *
++ * Declaring this is what lights up the host's 歌单/专辑 tabs for a mod provider. Without it
++ * `capabilities.userLibrary` stays false, those tabs render disabled — and since search follows
++ * the active tab, search would never route to this provider either. Pages are offset-based.
++ */
++export interface FoliumOmniProviderLibrary {
++    /** The user's collections (own + collected). */
++    getUserCollections(userId: string, page: { limit: number; offset: number }):
++        Promise<{ items: FoliumProviderCollection[]; hasMore: boolean; total?: number }>;
++    /**
++     * Tracks inside one collection; omit to make collections non-openable.
++     *
++     * LOCAL CHANGE (bodian-source): `providerData` hands back whatever the mod attached to the
++     * collection it listed (see FoliumProviderCollection.providerData), because some upstreams need
++     * more than the id to resolve a track page.
++     */
++    getCollectionTracks?(collectionId: string, page: { limit: number; offset: number }, providerData?: Record<string, unknown>):
++        Promise<{ items: FoliumProviderSong[]; hasMore: boolean; total?: number }>;
++    /**
++     * The user's collected albums. Declaring it sets `capabilities.userAlbums`, which is what the
++     * host's 专辑 tab checks (together with userLibrary). Omit and that tab stays disabled.
++     */
++    getUserAlbums?(userId: string, page: { limit: number; offset: number }):
++        Promise<{ items: FoliumProviderCollection[]; hasMore: boolean; total?: number }>;
++    /**
++     * Tracks of one album from `getUserAlbums`.
++     *
++     * LOCAL CHANGE (bodian-source): upstream routed every collection through `getCollectionTracks`,
++     * but the host asks `catalog.getAlbumTracks` for `type: 'album'` collections — without this
++     * member an album card opened to an empty grid. Omit and albums stay non-openable.
++     */
++    getAlbumTracks?(albumId: string, page: { limit: number; offset: number }):
++        Promise<{ items: FoliumProviderSong[]; hasMore: boolean; total?: number }>;
++}
++
++/**
++ * EXPERIMENTAL (`omni.providers`): recommendations for a mod provider.
++ *
++ * Declaring any member lights up the host's 电台 tab (it checks `capabilities.recommendations`),
++ * which renders one card for personal FM, one for the daily list and one per recommended
++ * collection. Members the mod leaves out simply yield empty cards.
++ *
++ * LOCAL CHANGE (bodian-source): the contract had no recommendations member at all, so a mod
++ * provider's 电台 tab could never leave its disabled state.
++ */
++export interface FoliumOmniProviderRecommendations {
++    /** Personal FM: fresh tracks for the FM queue. */
++    getPersonalFm?(): Promise<FoliumProviderSong[]>;
++    /** Daily recommendations. `refresh` asks for a new draw of the same list. */
++    getDailySongs?(refresh?: boolean): Promise<FoliumProviderSong[]>;
++    /** Recommended collections (playlists etc) shown alongside the two fixed cards. */
++    getRecommendedCollections?(limit: number): Promise<FoliumProviderCollection[]>;
++}
++
+ /**
+  * EXPERIMENTAL (`omni.providers`): an online music source. The host adapts it
+  * to its provider contract; songs from it play, queue and show lyrics like any
+@@ -1027,6 +1160,12 @@ export interface FoliumOmniProviderDef {
+     getAudioUrl?(song: FoliumProviderSong, quality: FoliumAudioQuality): Promise<{ url: string; expiresAt?: number } | null>;
+     /** LRC text (plus optional translation LRC); the host parses it. */
+     getLyrics?(song: FoliumProviderSong): Promise<{ lrc: string; translationLrc?: string } | null>;
++    /** Account login. Omit to make the provider anonymous-only. */
++    auth?: FoliumOmniProviderAuth;
++    /** The user's library (playlists etc). Omit to leave the host's library tabs disabled. */
++    library?: FoliumOmniProviderLibrary;
++    /** Recommendations (personal FM / daily list / recommended collections). Omit to leave 电台 off. */
++    recommendations?: FoliumOmniProviderRecommendations;
+ }
+ 
+ // ---------------------------------------------------------------- Shared helpers
+diff --git a/src/mods/folium/registries/omniProviders.ts b/src/mods/folium/registries/omniProviders.ts
+index 297f43b..3e2ed25 100644
+--- a/src/mods/folium/registries/omniProviders.ts
++++ b/src/mods/folium/registries/omniProviders.ts
+@@ -1,24 +1,33 @@
+ import type { SongResult, UnifiedSong } from '@/types';
+-import type { AudioQualityPreference, OnlineMusicProvider, ProviderCapabilities } from '@/types/onlineMusic';
++import type { AudioQualityPreference, OnlineMusicProvider, ProviderCapabilities, ProviderCollection } from '@/types/onlineMusic';
+ import {
+     getOnlineMusicProvider,
+     registerOnlineMusicProvider,
+     unregisterOnlineMusicProvider,
+ } from '@/services/onlineMusic/providerRegistry';
+ import { parseLRC } from '@/utils/lyrics/parserCore';
+-import type { FoliumOmniProviderDef, FoliumProviderSong } from '../contract';
++import type { FoliumOmniProviderDef, FoliumProviderCollection, FoliumProviderSong } from '../contract';
+ import { createFoliumRegistry } from '../registry';
+ 
+ // src/mods/folium/registries/omniProviders.ts
+ // EXPERIMENTAL `omni.providers`: a mod's online music source, adapted to the
+ // host OnlineMusicProvider contract so Omni routes to it like to any built-in
+-// provider (search, playback, lyrics; nothing account-related). Host provider
++// provider (search, playback, lyrics; plus, when the mod declares `auth`, the
++// same provider-neutral QR login flow the built-ins use). Host provider
+ // id is `folium.<modid>.<name>`: dots, because ':' already carries meaning in
+ // other host ids, and a dot can never collide with a built-in provider id.
+ //
+ // Songs keep the mod's own id as `sourceRef.mediaId`, so queues and history
+ // that outlive the mod still name the song; they become unplayable, not
+ // corrupt, while the mod is off.
++//
++// LOCAL CHANGE (bodian-source), all experimental-interface gaps upstream left closed:
++//   1. `auth`    — the host QR flow reads `provider.auth`; without it a mod provider
++//                  could never offer login and bailed out with `unsupported`.
++//   2. `library` — `capabilities.userLibrary`/`playlists` were hardcoded false, so the
++//                  host's 歌单/专辑 tabs stayed disabled for mod providers. Since search
++//                  follows the active tab, that also made the provider unsearchable.
++// Both contract types already existed; this file now forwards them.
+ 
+ export const foliumProviderId = (id: string) => `folium.${id.replace(':', '.')}`;
+ 
+@@ -47,17 +56,42 @@ const isProviderSong = (value: unknown): value is FoliumProviderSong => (
+     Boolean(value) && typeof (value as FoliumProviderSong).id === 'string' && typeof (value as FoliumProviderSong).title === 'string'
+ );
+ 
++const toProviderCollection = (providerId: string, collection: FoliumProviderCollection): ProviderCollection => ({
++    providerId,
++    id: collection.id,
++    name: collection.name,
++    type: collection.type || 'playlist',
++    ...(collection.coverUrl ? { coverUrl: collection.coverUrl } : {}),
++    ...(collection.description ? { description: collection.description } : {}),
++    ...(Number.isFinite(collection.trackCount) ? { trackCount: Number(collection.trackCount) } : {}),
++    ...(Number.isFinite(collection.playCount) ? { playCount: Number(collection.playCount) } : {}),
++    ...(collection.isOwned ? { isOwned: true } : {}),
++    // 宿主用 creator.nickname 显示作者；只给 description 会显示成「未知歌手」
++    ...(collection.creatorName ? { creator: { id: collection.id, nickname: collection.creatorName } } : {}),
++    // 原样透传：模组靠它把「这个 id 属于哪本上游目录」带到打开收藏那一刻
++    ...(collection.providerData ? { providerData: collection.providerData as ProviderCollection['providerData'] } : {}),
++});
++
+ const buildProvider = (providerId: string, def: FoliumOmniProviderDef): OnlineMusicProvider => {
+     const capabilities: ProviderCapabilities = {
+         search: typeof def.search === 'function',
+         playback: typeof def.getAudioUrl === 'function',
+         lyrics: typeof def.getLyrics === 'function',
+-        auth: false,
+-        userLibrary: false,
+-        playlists: false,
++        // "auth" means the host may ask who is signed in and sign out. A mod that only attaches a
++        // token internally should leave `auth` out and stay anonymous to the host.
++        auth: typeof def.auth?.getLoginStatus === 'function' && typeof def.auth?.logout === 'function',
++        // A library means "I can list the signed-in user's playlists"; the host gates its
++        // 歌单 tab on userLibrary + playlists, and its 专辑 tab on userLibrary + userAlbums.
++        userLibrary: typeof def.library?.getUserCollections === 'function',
++        playlists: typeof def.library?.getUserCollections === 'function',
++        // 专辑 tab 的开关：只有模组实现了 getUserAlbums 才点亮
++        userAlbums: typeof def.library?.getUserAlbums === 'function',
+         albums: false,
+         artists: false,
+-        recommendations: false,
++        // 电台 tab 的开关：任一推荐取数口实现即可点亮（没实现的那几张卡片是空的）
++        recommendations: typeof def.recommendations?.getPersonalFm === 'function'
++            || typeof def.recommendations?.getDailySongs === 'function'
++            || typeof def.recommendations?.getRecommendedCollections === 'function',
+         mutations: false,
+         wordByWordLyrics: false,
+     };
+@@ -120,13 +154,113 @@ const buildProvider = (providerId: string, def: FoliumOmniProviderDef): OnlineMu
+                 },
+             },
+         } : {}),
++        // A mod-declared `auth` is adapted 1:1 onto the host's OnlineAuthProvider. Optional
++        // members are forwarded only when the mod implements them, so the host keeps its own
++        // defaults (single-step QR without getQrLoginMethods, no self-timed TTL without
++        // getQrTtlMs) exactly as it does for built-in providers.
++        ...(capabilities.auth && def.auth ? {
++            auth: {
++                getLoginStatus: async () => {
++                    const user = await def.auth!.getLoginStatus();
++                    return user && typeof user.id === 'string' ? user : null;
++                },
++                logout: () => def.auth!.logout(),
++                ...(typeof def.auth.getQrKey === 'function' ? { getQrKey: () => def.auth!.getQrKey!() } : {}),
++                ...(typeof def.auth.createQr === 'function' ? { createQr: (key: string) => def.auth!.createQr!(key) } : {}),
++                ...(typeof def.auth.checkQr === 'function' ? { checkQr: (key: string) => def.auth!.checkQr!(key) } : {}),
++                ...(typeof def.auth.cancelQr === 'function' ? { cancelQr: (key: string) => def.auth!.cancelQr!(key) } : {}),
++                ...(typeof def.auth.getQrTtlMs === 'function' ? { getQrTtlMs: () => Number(def.auth!.getQrTtlMs!()) } : {}),
++            },
++        } : {}),
++        // A mod-declared `library` becomes the host's OnlineLibraryProvider, and its track listing
++        // goes to `catalog` — the same split built-ins use. Collections are only openable when the
++        // mod implements getCollectionTracks.
++        ...(capabilities.userLibrary && def.library ? {
++            library: {
++                getUserPlaylists: async (userId, limit, offset) => {
++                    const page = await def.library!.getUserCollections(String(userId), { limit, offset });
++                    const items = (page?.items ?? []).map((collection) => toProviderCollection(providerId, collection));
++                    return {
++                        items,
++                        hasMore: Boolean(page?.hasMore),
++                        nextOffset: offset + items.length,
++                        ...(Number.isFinite(page?.total) ? { total: page.total } : {}),
++                    };
++                },
++                // 专辑 tab 需要它；模组没实现就不挂这条，capabilities.userAlbums 也是 false
++                ...(typeof def.library.getUserAlbums === 'function' ? {
++                    getUserAlbums: async (userId, limit, offset) => {
++                        const page = await def.library!.getUserAlbums!(String(userId), { limit, offset });
++                        const items = (page?.items ?? []).map((collection) => toProviderCollection(providerId, collection));
++                        return {
++                            items,
++                            hasMore: Boolean(page?.hasMore),
++                            nextOffset: offset + items.length,
++                            ...(Number.isFinite(page?.total) ? { total: page.total } : {}),
++                        };
++                    },
++                } : {}),
++            },
++        } : {}),
++        ...(typeof def.library?.getCollectionTracks === 'function' || typeof def.library?.getAlbumTracks === 'function' ? {
++            catalog: {
++                ...(typeof def.library?.getCollectionTracks === 'function' ? {
++                    getPlaylistTracks: async (id, limit, offset, collection) => {
++                        const page = await def.library!.getCollectionTracks!(
++                            String(id), { limit, offset }, collection?.providerData,
++                        );
++                        const items = (page?.items ?? []).filter(isProviderSong).map((song) => toUnifiedSong(providerId, song));
++                        return {
++                            items,
++                            hasMore: Boolean(page?.hasMore),
++                            nextOffset: offset + items.length,
++                            ...(Number.isFinite(page?.total) ? { total: page.total } : {}),
++                        };
++                    },
++                } : {}),
++                // 专辑卡片走这条路：omni.getCollectionTracks 对 type==='album' 只问 getAlbumTracks
++                ...(typeof def.library?.getAlbumTracks === 'function' ? {
++                    getAlbumTracks: async (id, limit, offset) => {
++                        // 宿主的这个签名把 limit/offset 标成可选，缺省时按整张专辑取
++                        const pageLimit = Number(limit) > 0 ? Number(limit) : 500;
++                        const pageOffset = Number(offset) > 0 ? Number(offset) : 0;
++                        const page = await def.library!.getAlbumTracks!(String(id), { limit: pageLimit, offset: pageOffset });
++                        const items = (page?.items ?? []).filter(isProviderSong).map((song) => toUnifiedSong(providerId, song));
++                        return {
++                            items,
++                            hasMore: Boolean(page?.hasMore),
++                            nextOffset: pageOffset + items.length,
++                            ...(Number.isFinite(page?.total) ? { total: page.total } : {}),
++                        };
++                    },
++                } : {}),
++            },
++        } : {}),
++        // 电台 tab 的三张卡片：私人 FM / 每日推荐各是一串歌，推荐歌单是一串 collection。
++        // 没实现的那个口子在这里根本不挂，宿主那边拿到的就是空数组。
++        ...(capabilities.recommendations && def.recommendations ? {
++            recommendations: {
++                ...(typeof def.recommendations.getPersonalFm === 'function' ? {
++                    getPersonalFm: async () => (await def.recommendations!.getPersonalFm!() ?? [])
++                        .filter(isProviderSong).map((song) => toUnifiedSong(providerId, song)),
++                } : {}),
++                ...(typeof def.recommendations.getDailySongs === 'function' ? {
++                    getDailySongs: async (refresh?: boolean) => (await def.recommendations!.getDailySongs!(refresh) ?? [])
++                        .filter(isProviderSong).map((song) => toUnifiedSong(providerId, song)),
++                } : {}),
++                ...(typeof def.recommendations.getRecommendedCollections === 'function' ? {
++                    getRecommendedCollections: async (limit: number) => (await def.recommendations!.getRecommendedCollections!(limit) ?? [])
++                        .map((collection) => toProviderCollection(providerId, collection)),
++                } : {}),
++            },
++        } : {}),
+     };
+ };
+ 
+ export const omniProvidersRegistry = createFoliumRegistry<FoliumOmniProviderDef, { def: FoliumOmniProviderDef; providerId: string }>('omni.providers', {
+     validate: (def, { id }) => {
+-        if (!def.search && !def.getAudioUrl && !def.getLyrics) {
+-            throw new Error('omni.providers.register: implement at least one of search / getAudioUrl / getLyrics');
++        if (!def.search && !def.getAudioUrl && !def.getLyrics && !def.auth) {
++            throw new Error('omni.providers.register: implement at least one of search / getAudioUrl / getLyrics / auth');
+         }
+         const providerId = foliumProviderId(id);
+         if (getOnlineMusicProvider(providerId)) {
+-- 
+2.54.0.windows.1
+
+
+From 0940b7a70df923bd58ef4450655df9c35bd71aa5 Mon Sep 17 00:00:00 2001
+From: Winter wuyuhang <155148127+2075689219@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 17:24:42 +0800
+Subject: [PATCH 2/3] =?UTF-8?q?feat(omni):=20=E6=90=9C=E7=B4=A2=E6=AD=8C?=
+ =?UTF-8?q?=E5=8D=95=20=E2=80=94=E2=80=94=20=E4=BB=8E=E5=A5=91=E7=BA=A6?=
+ =?UTF-8?q?=E5=88=B0=E7=95=8C=E9=9D=A2=E7=9A=84=E4=B8=8A=E6=B8=B8=E7=BA=A7?=
+ =?UTF-8?q?=E8=83=BD=E5=8A=9B?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+上游搜索只回歌曲（OnlineSearchProvider 只有 searchSongs，内置源也没搜过歌单），
+音源"能搜歌单"因此无处返回。补齐整条链，四处都标了 LOCAL CHANGE (bodian-source)：
+
+- types/onlineMusic.ts：OnlineSearchProvider.searchCollections?（可选；
+  不实现即无此能力，内置源行为完全不变）
+- omni.ts：searchCollections / searchProviderCollections（未实现返回空页，不抛错）
+- useSearchNavigationStore：歌单结果与歌曲并行取，单独 try/catch ——
+  歌单失败只是"分区不显示"，不会把整次搜索拖成失败
+- 界面：SearchWorkspace 的「歌单」分区 + 新组件 SearchCollectionCard，
+  点开复用既有 navigateToCollection(..., 'search')；空态判断同时看歌曲与歌单
+- folium 契约与适配层：FoliumOmniProviderDef.searchCollections? 与 search 相互独立，
+  只实现其一也能注册（searchSongs 保留空实现以满足 OnlineSearchProvider 的必填签名）
+
+实测：搜「民谣」→ 30 首歌 + 12 个歌单；点开第一个歌单取到 91 首曲目（走 id 自解释编码，
+不需要宿主回传 providerData）。tools/probe-bodian.mjs 增加对应步骤，10/10 通过。
+---
+ src/App.tsx                                   | 11 ++++
+ .../app/overlays/buildAppOverlaysModel.ts     |  4 ++
+ .../app/search/SearchCollectionCard.tsx       | 55 +++++++++++++++++++
+ src/components/app/search/SearchWorkspace.tsx | 31 ++++++++++-
+ src/mods/folium/contract.ts                   |  8 +++
+ src/mods/folium/registries/omniProviders.ts   | 40 ++++++++++----
+ src/services/onlineMusic/omni.ts              | 28 ++++++++++
+ src/stores/useSearchNavigationStore.ts        | 47 +++++++++++++++-
+ src/types/onlineMusic.ts                      |  8 +++
+ 9 files changed, 217 insertions(+), 15 deletions(-)
+ create mode 100644 src/components/app/search/SearchCollectionCard.tsx
+
+diff --git a/src/App.tsx b/src/App.tsx
+index b7bc569..a4404a0 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -1119,6 +1119,16 @@ export default function App() {
+         setStatusMsg({ type: 'error', text: t('search.catalogUnavailable') });
+     }, [navigateToCollection, setStatusMsg, t]);
+ 
++    /**
++     * LOCAL CHANGE (bodian-source): 搜索页「歌单」分区点开一张卡片。
++     *
++     * 与上面的专辑走同一条导航（`navigateToCollection` → GridView），差别只是集合已经拿到了，
++     * 不需要再解析一次；providerId 由 omni 在搜索结果里带上。
++     */
++    const handleSearchResultCollectionOpen = useCallback((collection: ProviderCollection) => {
++        navigateToCollection(createOnlineGridViewCollection(collection, collection.providerId), 'search');
++    }, [navigateToCollection]);
++
+     usePlaybackUiEffects({
+         statusMsg,
+         updateCacheSize,
+@@ -2272,6 +2282,7 @@ export default function App() {
+         handleSearchResultAddToQueue,
+         handleSearchResultArtistOpen,
+         handleSearchResultAlbumOpen,
++        handleSearchResultCollectionOpen,
+         devDebugSnapshot,
+         effectiveLoopMode,
+         canToggleCurrentPlayback,
+diff --git a/src/components/app/overlays/buildAppOverlaysModel.ts b/src/components/app/overlays/buildAppOverlaysModel.ts
+index 49ebf12..c7b83c4 100644
+--- a/src/components/app/overlays/buildAppOverlaysModel.ts
++++ b/src/components/app/overlays/buildAppOverlaysModel.ts
+@@ -87,6 +87,8 @@ export type AppOverlaysDeps = {
+     handleSearchResultAddToQueue: (track: UnifiedSong) => void;
+     handleSearchResultArtistOpen: SearchOverlayProps['onOpenArtist'];
+     handleSearchResultAlbumOpen: SearchOverlayProps['onOpenAlbum'];
++    /** LOCAL CHANGE (bodian-source): 搜索页「歌单」分区点开某张卡片。 */
++    handleSearchResultCollectionOpen: SearchOverlayProps['onOpenCollection'];
+     devDebugSnapshot: any;
+     effectiveLoopMode: 'off' | 'all' | 'one';
+     canToggleCurrentPlayback: boolean;
+@@ -134,6 +136,7 @@ export const buildAppOverlaysModel = ({
+     handleSearchResultAddToQueue,
+     handleSearchResultArtistOpen,
+     handleSearchResultAlbumOpen,
++    handleSearchResultCollectionOpen,
+     isDevDebugOverlayVisible,
+     isMemoryMonitorVisible,
+     memoryMonitorShortcutLabel,
+@@ -223,6 +226,7 @@ export const buildAppOverlaysModel = ({
+             onAddTrackToQueue: handleSearchResultAddToQueue,
+             onOpenArtist: handleSearchResultArtistOpen,
+             onOpenAlbum: handleSearchResultAlbumOpen,
++            onOpenCollection: handleSearchResultCollectionOpen,
+         }
+         : null,
+     // Not gated on the view, and that was a real hole: the app cold-starts on the home page,
+diff --git a/src/components/app/search/SearchCollectionCard.tsx b/src/components/app/search/SearchCollectionCard.tsx
+new file mode 100644
+index 0000000..515b1a7
+--- /dev/null
++++ b/src/components/app/search/SearchCollectionCard.tsx
+@@ -0,0 +1,55 @@
++import React from 'react';
++import { ListMusic } from 'lucide-react';
++import type { ProviderCollection } from '../../../types/onlineMusic';
++
++// src/components/app/search/SearchCollectionCard.tsx
++//
++// 搜索页「歌单」分区里的一张卡片。样式与搜索行保持同一套（isDaylight 控制明暗），
++// 信息只保留必要的三样：封面、名称、作者/曲目数 —— 分区是横向滚动的窄条，不是主列表。
++
++type SearchCollectionCardProps = {
++    collection: ProviderCollection;
++    isDaylight: boolean;
++    onOpen: (collection: ProviderCollection) => void;
++};
++
++const FALLBACK_COVER_CLASS = 'flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-black/5 dark:bg-white/5 opacity-50';
++
++const SearchCollectionCard: React.FC<SearchCollectionCardProps> = ({ collection, isDaylight, onOpen }) => {
++    const subtitle = [
++        collection.creator?.nickname,
++        collection.trackCount ? `${collection.trackCount} 首` : '',
++    ].filter(Boolean).join(' · ');
++
++    return (
++        <button
++            type="button"
++            onClick={() => onOpen(collection)}
++            title={collection.name}
++            className={`flex w-56 shrink-0 items-center gap-3 rounded-2xl border p-2 text-left transition-colors ${
++                isDaylight
++                    ? 'border-black/10 bg-black/[0.03] hover:bg-black/[0.07]'
++                    : 'border-white/10 bg-white/[0.04] hover:bg-white/[0.09]'
++            }`}
++        >
++            {collection.coverUrl ? (
++                <img
++                    src={collection.coverUrl}
++                    alt=""
++                    loading="lazy"
++                    className="h-12 w-12 shrink-0 rounded-xl object-cover"
++                />
++            ) : (
++                <span className={FALLBACK_COVER_CLASS}>
++                    <ListMusic size={18} />
++                </span>
++            )}
++            <span className="min-w-0 flex-1">
++                <span className="block truncate text-sm font-medium">{collection.name}</span>
++                <span className="block truncate text-xs opacity-60">{subtitle}</span>
++            </span>
++        </button>
++    );
++};
++
++export default SearchCollectionCard;
+diff --git a/src/components/app/search/SearchWorkspace.tsx b/src/components/app/search/SearchWorkspace.tsx
+index 26911a9..3de5465 100644
+--- a/src/components/app/search/SearchWorkspace.tsx
++++ b/src/components/app/search/SearchWorkspace.tsx
+@@ -4,12 +4,13 @@ import { AlertCircle, Loader2, Search, X } from 'lucide-react';
+ import { useTranslation } from 'react-i18next';
+ import { useShallow } from 'zustand/react/shallow';
+ import type { Theme, UnifiedSong } from '../../../types';
+-import type { MediaId } from '../../../types/onlineMusic';
++import type { MediaId, ProviderCollection } from '../../../types/onlineMusic';
+ import {
+     type SearchSource,
+     useSearchNavigationStore,
+ } from '../../../stores/useSearchNavigationStore';
+ import SearchResultsList from './SearchResultsList';
++import SearchCollectionCard from './SearchCollectionCard';
+ import { useCollectionNavigationStore } from '../../../stores/useCollectionNavigationStore';
+ import { useOnlineProviderAccountStore } from '../../../stores/useOnlineProviderAccountStore';
+ import { omni } from '../../../services/onlineMusic/omni';
+@@ -26,6 +27,8 @@ type SearchWorkspaceProps = {
+     onAddTrackToQueue: (track: UnifiedSong) => void;
+     onOpenArtist: (track: UnifiedSong, artistName: string, artistId?: MediaId, entityId?: string) => void;
+     onOpenAlbum: (track: UnifiedSong, albumName: string, albumId?: MediaId, entityId?: string) => void;
++    /** LOCAL CHANGE (bodian-source): open a collection that came back from the「歌单」section. */
++    onOpenCollection: (collection: ProviderCollection) => void;
+ };
+ 
+ const SearchWorkspace: React.FC<SearchWorkspaceProps> = ({
+@@ -38,12 +41,14 @@ const SearchWorkspace: React.FC<SearchWorkspaceProps> = ({
+     onAddTrackToQueue,
+     onOpenArtist,
+     onOpenAlbum,
++    onOpenCollection,
+ }) => {
+     const { t } = useTranslation();
+     const {
+         searchQuery,
+         searchSourceTab,
+         searchResults,
++        searchCollectionResults,
+         isSearchOpen,
+         isSearching,
+         isLoadingMore,
+@@ -56,6 +61,7 @@ const SearchWorkspace: React.FC<SearchWorkspaceProps> = ({
+         searchQuery: state.searchQuery,
+         searchSourceTab: state.searchSourceTab,
+         searchResults: state.searchResults,
++        searchCollectionResults: state.searchCollectionResults,
+         isSearchOpen: state.isSearchOpen,
+         isSearching: state.isSearching,
+         isLoadingMore: state.isLoadingMore,
+@@ -66,6 +72,7 @@ const SearchWorkspace: React.FC<SearchWorkspaceProps> = ({
+         setSearchScrollTop: state.setSearchScrollTop,
+     })));
+     const results = searchResults || [];
++    const collections = searchCollectionResults || [];
+     const activeOnlineProviderId = useOnlineProviderAccountStore(state => state.activeProviderId);
+     const sources = useMemo<SearchSource[]>(() => [activeOnlineProviderId, 'local', 'navidrome'], [activeOnlineProviderId]);
+     const hasCollection = useCollectionNavigationStore(state => Boolean(state.snapshot?.stack.length));
+@@ -184,12 +191,32 @@ const SearchWorkspace: React.FC<SearchWorkspaceProps> = ({
+                                     {t('search.retry')}
+                                 </button>
+                             </div>
+-                        ) : results.length === 0 ? (
++                        ) : results.length === 0 && collections.length === 0 ? (
+                             <div className="flex h-full items-center justify-center text-sm opacity-50">
+                                 {t('home.noResults')}
+                             </div>
+                         ) : (
+                             <div className="flex h-full flex-col">
++                                {/* LOCAL CHANGE (bodian-source): 歌单分区。
++                                    只有实现了 searchCollections 的音源才会有内容；歌曲为空但歌单有结果时
++                                    也照样显示（所以上面的空态判断是两个都空）。 */}
++                                {collections.length > 0 && (
++                                    <section className="shrink-0 pb-3">
++                                        <h3 className="mb-2 text-xs font-semibold opacity-55">
++                                            {t('home.playlists')}
++                                        </h3>
++                                        <div className="custom-scrollbar flex gap-3 overflow-x-auto pb-1">
++                                            {collections.map(collection => (
++                                                <SearchCollectionCard
++                                                    key={`${collection.providerId}:${collection.id}`}
++                                                    collection={collection}
++                                                    isDaylight={isDaylight}
++                                                    onOpen={onOpenCollection}
++                                                />
++                                            ))}
++                                        </div>
++                                    </section>
++                                )}
+                                 <div className="min-h-0 flex-1">
+                                     <SearchResultsList
+                                         tracks={results}
+diff --git a/src/mods/folium/contract.ts b/src/mods/folium/contract.ts
+index 174c0a6..ef9197f 100644
+--- a/src/mods/folium/contract.ts
++++ b/src/mods/folium/contract.ts
+@@ -1154,6 +1154,14 @@ export interface FoliumOmniProviderDef {
+     shortName?: string;
+     /** Search songs; `page` is offset-based. */
+     search?(query: string, page: { limit: number; offset: number }): Promise<{ items: FoliumProviderSong[]; hasMore: boolean; total?: number }>;
++    /**
++     * LOCAL CHANGE (bodian-source): search collections (playlists …) alongside songs.
++     *
++     * The host renders these in a「歌单」section on its search page. Optional and independent of
++     * `search`: a provider may implement either, both, or neither.
++     */
++    searchCollections?(query: string, page: { limit: number; offset: number }):
++        Promise<{ items: FoliumProviderCollection[]; hasMore: boolean; total?: number }>;
+     /** One song by id. */
+     getSong?(id: string): Promise<FoliumProviderSong | null>;
+     /** A playable URL for the song at a quality. */
+diff --git a/src/mods/folium/registries/omniProviders.ts b/src/mods/folium/registries/omniProviders.ts
+index 3e2ed25..d2a920a 100644
+--- a/src/mods/folium/registries/omniProviders.ts
++++ b/src/mods/folium/registries/omniProviders.ts
+@@ -74,7 +74,8 @@ const toProviderCollection = (providerId: string, collection: FoliumProviderColl
+ 
+ const buildProvider = (providerId: string, def: FoliumOmniProviderDef): OnlineMusicProvider => {
+     const capabilities: ProviderCapabilities = {
+-        search: typeof def.search === 'function',
++        // 搜索能力：歌曲、集合任有一项即可（两者的实现各自独立挂载）
++        search: typeof def.search === 'function' || typeof def.searchCollections === 'function',
+         playback: typeof def.getAudioUrl === 'function',
+         lyrics: typeof def.getLyrics === 'function',
+         // "auth" means the host may ask who is signed in and sign out. A mod that only attaches a
+@@ -108,16 +109,33 @@ const buildProvider = (providerId: string, def: FoliumOmniProviderDef): OnlineMu
+         },
+         ...(capabilities.search ? {
+             search: {
+-                searchSongs: async (query, limit, offset) => {
+-                    const page = await def.search!(query, { limit, offset });
+-                    const items = (page?.items ?? []).filter(isProviderSong).map((song) => toUnifiedSong(providerId, song));
+-                    return {
+-                        items,
+-                        hasMore: Boolean(page?.hasMore),
+-                        ...(Number.isFinite(page?.total) ? { total: page.total } : {}),
+-                        nextOffset: offset + items.length,
+-                    };
+-                },
++                // searchSongs 是契约里的必填项：只实现了「搜集合」的音源也要有一个空实现，
++                // 而不是让对象形状不满足 OnlineSearchProvider。
++                searchSongs: typeof def.search === 'function'
++                    ? async (query, limit, offset) => {
++                        const page = await def.search!(query, { limit, offset });
++                        const items = (page?.items ?? []).filter(isProviderSong).map((song) => toUnifiedSong(providerId, song));
++                        return {
++                            items,
++                            hasMore: Boolean(page?.hasMore),
++                            ...(Number.isFinite(page?.total) ? { total: page.total } : {}),
++                            nextOffset: offset + items.length,
++                        };
++                    }
++                    : async (_query, _limit, offset) => ({ items: [], hasMore: false, nextOffset: offset }),
++                // 搜集合（歌单…）：宿主搜索页的「歌单」分区就是接在这里
++                ...(typeof def.searchCollections === 'function' ? {
++                    searchCollections: async (query, limit, offset) => {
++                        const page = await def.searchCollections!(query, { limit, offset });
++                        const items = (page?.items ?? []).map((collection) => toProviderCollection(providerId, collection));
++                        return {
++                            items,
++                            hasMore: Boolean(page?.hasMore),
++                            ...(Number.isFinite(page?.total) ? { total: page.total } : {}),
++                            nextOffset: offset + items.length,
++                        };
++                    },
++                } : {}),
+             },
+         } : {}),
+         ...(capabilities.playback ? {
+diff --git a/src/services/onlineMusic/omni.ts b/src/services/onlineMusic/omni.ts
+index 3da261a..55efc34 100644
+--- a/src/services/onlineMusic/omni.ts
++++ b/src/services/onlineMusic/omni.ts
+@@ -193,6 +193,34 @@ export const omni = {
+         return provider.search.searchSongs(query, page.limit, page.offset);
+     },
+ 
++    /**
++     * LOCAL CHANGE (bodian-source): collection search (playlists …) for the active provider.
++     *
++     * Returns an empty page rather than throwing when the provider has no `searchCollections` —
++     * the host's search page renders the「歌单」section only when there is something to show, so
++     * built-in sources keep their current behaviour untouched.
++     */
++    async searchCollections(query: string, page: PageInput): Promise<OmniPage<OmniCollection>> {
++        return withActiveProvider(async provider => {
++            if (!providerSupports(provider, 'search') || !provider.search?.searchCollections) {
++                return emptyPage(page.offset);
++            }
++            return provider.search.searchCollections(query, page.limit, page.offset);
++        });
++    },
++
++    async searchProviderCollections(
++        providerId: OmniProviderId,
++        query: string,
++        page: PageInput,
++    ): Promise<OmniPage<OmniCollection>> {
++        const provider = requireOnlineMusicProvider(providerId);
++        if (!providerSupports(provider, 'search') || !provider.search?.searchCollections) {
++            return emptyPage(page.offset);
++        }
++        return provider.search.searchCollections(query, page.limit, page.offset);
++    },
++
+     async getLoginStatus(providerId: OmniProviderId): Promise<OmniUser | null> {
+         const provider = requireOnlineMusicProvider(providerId);
+         if (!provider.auth) return unsupported(providerId, 'auth');
+diff --git a/src/stores/useSearchNavigationStore.ts b/src/stores/useSearchNavigationStore.ts
+index 2d594a6..447707a 100644
+--- a/src/stores/useSearchNavigationStore.ts
++++ b/src/stores/useSearchNavigationStore.ts
+@@ -1,7 +1,7 @@
+ import { create } from 'zustand';
+ import { getNavidromeConfig, navidromeApi } from '../services/navidromeService';
+ import type { HomeViewTab, LocalSong, SongResult, UnifiedSong } from '../types';
+-import type { OnlineProviderId } from '../types/onlineMusic';
++import type { OnlineProviderId, ProviderCollection } from '../types/onlineMusic';
+ import {
+     applyLocalLibraryEntityDisplay,
+     buildUnifiedLocalSong,
+@@ -39,6 +39,13 @@ interface SearchNavigationState {
+     searchQuery: string;
+     searchSourceTab: SearchSource;
+     searchResults: UnifiedSong[] | null;
++    /**
++     * LOCAL CHANGE (bodian-source): collection (playlist) search results for the same query.
++     *
++     * Kept beside the song results instead of inside them — the search page renders it as its own
++     *「歌单」section, and a provider without `searchCollections` leaves it empty.
++     */
++    searchCollectionResults: ProviderCollection[] | null;
+     searchReturnView: SearchReturnView;
+     isSearchOpen: boolean;
+     isSearching: boolean;
+@@ -147,6 +154,32 @@ const searchOnlineProviderSongs = async (
+     return { results: page.items, hasMore: page.hasMore, nextOffset: page.nextOffset };
+ };
+ 
++/** 歌单分区取多少条：一屏够看即可，不做翻页。 */
++const SEARCH_COLLECTION_LIMIT = 12;
++
++/**
++ * LOCAL CHANGE (bodian-source): collection search, best-effort.
++ *
++ * 歌单结果是歌曲结果之外的附加信息：provider 没实现、或者这一次失败，都只是"这个分区不显示"，
++ * 绝不能把整次搜索拖成失败 —— 所以这里自己吞掉错误。
++ */
++const searchCollectionsForSource = async (
++    sourceTab: SearchSource,
++    query: string,
++): Promise<ProviderCollection[]> => {
++    if (sourceTab === 'local' || sourceTab === 'navidrome') return [];
++    try {
++        const page = await omni.searchProviderCollections(sourceTab, query, {
++            limit: SEARCH_COLLECTION_LIMIT,
++            offset: 0,
++        });
++        return page.items;
++    } catch (error) {
++        console.warn('[SearchStore] collection search failed:', error);
++        return [];
++    }
++};
++
+ const executeSearch = async (
+     query: string,
+     sourceTab: SearchSource,
+@@ -180,6 +213,7 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+     searchQuery: '',
+     searchSourceTab: 'netease',
+     searchResults: null,
++    searchCollectionResults: null,
+     searchReturnView: 'home',
+     isSearchOpen: false,
+     isSearching: false,
+@@ -218,6 +252,7 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+             searchSourceTab: sourceTab,
+             searchReturnView: returnView,
+             searchResults: cached?.results ?? null,
++            searchCollectionResults: null,
+             offset: cached?.offset ?? 0,
+             hasMore: cached?.hasMore ?? false,
+             scrollTop: cached?.scrollTop ?? 0,
+@@ -232,6 +267,7 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+         searchQuery: '',
+         searchSourceTab: onlineProviderId ?? state.searchSourceTab,
+         searchResults: null,
++        searchCollectionResults: null,
+         searchReturnView: 'home',
+         isSearchOpen: false,
+         isSearching: false,
+@@ -259,18 +295,24 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+             searchError: null,
+             requestId,
+             searchResults: null,
++            searchCollectionResults: null,
+             offset: 0,
+             hasMore: false,
+             scrollTop: 0,
+         });
+ 
+         try {
+-            const result = await executeSearch(trimmedQuery, sourceTab, 0, get().limit, deps);
++            // 歌曲与歌单并行：歌单那条是附加信息，失败也只让分区为空（见 searchCollectionsForSource）
++            const [result, collections] = await Promise.all([
++                executeSearch(trimmedQuery, sourceTab, 0, get().limit, deps),
++                searchCollectionsForSource(sourceTab, trimmedQuery),
++            ]);
+             if (get().requestId !== requestId) {
+                 return true;
+             }
+             set(state => ({
+                 searchResults: result.results,
++                searchCollectionResults: collections,
+                 hasMore: result.hasMore,
+                 offset: result.nextOffset,
+                 isSearching: false,
+@@ -292,6 +334,7 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+             }
+             set({
+                 searchResults: [],
++                searchCollectionResults: [],
+                 hasMore: false,
+                 offset: 0,
+                 isSearching: false,
+diff --git a/src/types/onlineMusic.ts b/src/types/onlineMusic.ts
+index 7aa223f..3bf5f5c 100644
+--- a/src/types/onlineMusic.ts
++++ b/src/types/onlineMusic.ts
+@@ -213,6 +213,14 @@ export class OnlineProviderError extends Error {
+ 
+ export interface OnlineSearchProvider {
+     searchSongs(query: string, limit: number, offset: number): Promise<ProviderPage<UnifiedSong>>;
++    /**
++     * LOCAL CHANGE (bodian-source): optional collection search (playlists etc).
++     *
++     * Upstream search only ever returned songs, so a source that can search playlists had nowhere
++     * to put the result. Implementing it adds the host's「歌单」section on the search page;
++     * providers that leave it out show songs only, exactly as before.
++     */
++    searchCollections?(query: string, limit: number, offset: number): Promise<ProviderPage<ProviderCollection>>;
+ }
+ 
+ export interface OnlinePlaybackProvider {
+-- 
+2.54.0.windows.1
+
+
+From 4232ace4926c5350ac5d08254d5b25065b72c4c3 Mon Sep 17 00:00:00 2001
+From: Winter wuyuhang <155148127+2075689219@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 17:36:01 +0800
+Subject: [PATCH 3/3] =?UTF-8?q?fix(search):=20=E6=90=9C=E7=B4=A2=E6=AD=8C?=
+ =?UTF-8?q?=E5=8D=95=E5=9C=A8=E9=83=A8=E5=88=86=E5=85=A5=E5=8F=A3=E6=8B=BF?=
+ =?UTF-8?q?=E4=B8=8D=E5=88=B0=E7=BB=93=E6=9E=9C=20=E2=80=94=E2=80=94=20?=
+ =?UTF-8?q?=E5=AF=B9=E9=BD=90=E6=90=9C=E7=B4=A2=E6=BA=90=20+=20=E6=AD=8C?=
+ =?UTF-8?q?=E5=8D=95=E5=88=86=E9=A1=B5?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+用户报"自己搜索时没有歌单"，三个问题一起修：
+
+1. 搜索源与当前平台不一致（主因）
+   store 的 searchSourceTab 与激活平台是两份状态：把平台切到波点后，它可能仍是 'netease'，
+   而 'netease' 不在搜索页的音源 tab 列表（当前平台 / 本地 / Navidrome）里 —— 界面上没有任何
+   高亮，用户以为在搜波点，实际搜的是网易云，自然没有歌单分区。
+   现在打开搜索覆盖层时把搜索源对齐到当前平台；用户手动切过的源都在列表里，不会被覆盖。
+   store 新增 action：setSearchSourceTab。
+
+2. 歌单结果纳入缓存
+   restoreSearch（浏览器前进/后退恢复历史）会把歌单结果清掉，表现为"重开搜索只剩歌曲"。
+   现在 results 与 collections 一起写进 searchCache，恢复时一并还原。
+
+3. 歌单分区支持「加载更多」
+   新增 collectionOffset / collectionHasMore 与 loadMoreSearchCollections（点一次追加一页 12 条，
+   hasMore 先落下当并发锁）；分区尾部是一张虚线"加载更多"卡片。
+   collectionHasMore 同样进缓存，否则恢复历史后按钮会消失。
+
+实测：首页搜索「民谣」→ 12 个歌单、按钮可见；点一次 → 24 个、hasMore 仍 true；
+把 searchSourceTab 打回 'netease' 后 1.2s 内自动纠正为波点。
+---
+ src/components/app/search/SearchWorkspace.tsx | 39 +++++++++-
+ src/stores/useSearchNavigationStore.ts        | 71 ++++++++++++++++---
+ 2 files changed, 100 insertions(+), 10 deletions(-)
+
+diff --git a/src/components/app/search/SearchWorkspace.tsx b/src/components/app/search/SearchWorkspace.tsx
+index 3de5465..4af8d2d 100644
+--- a/src/components/app/search/SearchWorkspace.tsx
++++ b/src/components/app/search/SearchWorkspace.tsx
+@@ -1,6 +1,6 @@
+ import React, { useEffect, useMemo } from 'react';
+ import { AnimatePresence, motion } from 'framer-motion';
+-import { AlertCircle, Loader2, Search, X } from 'lucide-react';
++import { AlertCircle, Loader2, Plus, Search, X } from 'lucide-react';
+ import { useTranslation } from 'react-i18next';
+ import { useShallow } from 'zustand/react/shallow';
+ import type { Theme, UnifiedSong } from '../../../types';
+@@ -49,6 +49,7 @@ const SearchWorkspace: React.FC<SearchWorkspaceProps> = ({
+         searchSourceTab,
+         searchResults,
+         searchCollectionResults,
++        collectionHasMore,
+         isSearchOpen,
+         isSearching,
+         isLoadingMore,
+@@ -57,11 +58,14 @@ const SearchWorkspace: React.FC<SearchWorkspaceProps> = ({
+         scrollTop,
+         setSearchQuery,
+         setSearchScrollTop,
++        setSearchSourceTab,
++        loadMoreSearchCollections,
+     } = useSearchNavigationStore(useShallow(state => ({
+         searchQuery: state.searchQuery,
+         searchSourceTab: state.searchSourceTab,
+         searchResults: state.searchResults,
+         searchCollectionResults: state.searchCollectionResults,
++        collectionHasMore: state.collectionHasMore,
+         isSearchOpen: state.isSearchOpen,
+         isSearching: state.isSearching,
+         isLoadingMore: state.isLoadingMore,
+@@ -70,11 +74,28 @@ const SearchWorkspace: React.FC<SearchWorkspaceProps> = ({
+         scrollTop: state.scrollTop,
+         setSearchQuery: state.setSearchQuery,
+         setSearchScrollTop: state.setSearchScrollTop,
++        setSearchSourceTab: state.setSearchSourceTab,
++        loadMoreSearchCollections: state.loadMoreSearchCollections,
+     })));
+     const results = searchResults || [];
+     const collections = searchCollectionResults || [];
+     const activeOnlineProviderId = useOnlineProviderAccountStore(state => state.activeProviderId);
+     const sources = useMemo<SearchSource[]>(() => [activeOnlineProviderId, 'local', 'navidrome'], [activeOnlineProviderId]);
++
++    /**
++     * LOCAL CHANGE (bodian-source): 打开搜索时把「搜索音源」对齐到当前平台。
++     *
++     * store 的 `searchSourceTab` 与当前激活平台是两份状态：把平台切到波点之后，它可能仍停在
++     * `netease`，而 `netease` 不在下面的音源 tab 列表里 —— 界面没有任何高亮，用户以为在搜波点，
++     * 实际搜的是网易云（于是没有歌单分区，连搜索结果的来源都是错的）。这里在打开时纠正一次；
++     * 用户手动切过的源（本地 / Navidrome / 其它平台）都在列表里，不会被覆盖。
++     */
++    useEffect(() => {
++        if (!isSearchOpen || isSearching) return;
++        if (!sources.includes(searchSourceTab)) {
++            setSearchSourceTab(activeOnlineProviderId);
++        }
++    }, [activeOnlineProviderId, isSearchOpen, isSearching, searchSourceTab, setSearchSourceTab, sources]);
+     const hasCollection = useCollectionNavigationStore(state => Boolean(state.snapshot?.stack.length));
+     const getSourceLabel = (source: SearchSource) => {
+         if (source === 'local') return t('search.sourceLocal');
+@@ -214,6 +235,22 @@ const SearchWorkspace: React.FC<SearchWorkspaceProps> = ({
+                                                     onOpen={onOpenCollection}
+                                                 />
+                                             ))}
++                                            {/* LOCAL CHANGE (bodian-source): 加载更多（点一次取下一页；
++                                                store 会先把 hasMore 落下当并发锁，所以按钮会短暂消失） */}
++                                            {collectionHasMore && (
++                                                <button
++                                                    type="button"
++                                                    onClick={() => void loadMoreSearchCollections()}
++                                                    className={`flex w-28 shrink-0 flex-col items-center justify-center gap-1 rounded-2xl border border-dashed text-xs transition-colors ${
++                                                        isDaylight
++                                                            ? 'border-black/15 text-black/55 hover:bg-black/[0.06]'
++                                                            : 'border-white/15 text-white/55 hover:bg-white/[0.08]'
++                                                    }`}
++                                                >
++                                                    <Plus size={16} />
++                                                    {t('home.loadMore')}
++                                                </button>
++                                            )}
+                                         </div>
+                                     </section>
+                                 )}
+diff --git a/src/stores/useSearchNavigationStore.ts b/src/stores/useSearchNavigationStore.ts
+index 447707a..2cc1797 100644
+--- a/src/stores/useSearchNavigationStore.ts
++++ b/src/stores/useSearchNavigationStore.ts
+@@ -29,6 +29,10 @@ type SearchExecutionResult = {
+ 
+ type SearchCacheEntry = {
+     results: UnifiedSong[];
++    /** LOCAL CHANGE (bodian-source): 歌单结果一并缓存，否则重开搜索只剩歌曲。 */
++    collections: ProviderCollection[];
++    /** 歌单分区是否还有下一页（不缓存它的话，恢复历史后"加载更多"按钮会消失）。 */
++    collectionHasMore: boolean;
+     offset: number;
+     hasMore: boolean;
+     scrollTop: number;
+@@ -46,6 +50,9 @@ interface SearchNavigationState {
+      *「歌单」section, and a provider without `searchCollections` leaves it empty.
+      */
+     searchCollectionResults: ProviderCollection[] | null;
++    /** 歌单结果的下一页游标（横向分区"加载更多"用）。 */
++    collectionOffset: number;
++    collectionHasMore: boolean;
+     searchReturnView: SearchReturnView;
+     isSearchOpen: boolean;
+     isSearching: boolean;
+@@ -59,6 +66,16 @@ interface SearchNavigationState {
+     searchCache: Record<string, SearchCacheEntry>;
+     setHomeViewTab: (tab: HomeViewTab) => void;
+     setSearchQuery: (query: string) => void;
++    /**
++     * LOCAL CHANGE (bodian-source): 切换搜索音源。
++     *
++     * 需要它是因为 store 里的 `searchSourceTab` 与当前激活平台是**两份状态**：平台切到波点后，
++     * `searchSourceTab` 还可能停在 'netease'（而它又不在搜索页的音源 tab 列表里，界面上没有
++     * 任何高亮）—— 表现为"在波点平台下搜歌，却搜的是网易云，自然没有歌单"。
++     */
++    setSearchSourceTab: (tab: SearchSource) => void;
++    /** 歌单分区"加载更多"。 */
++    loadMoreSearchCollections: () => Promise<void>;
+     setSearchScrollTop: (scrollTop: number) => void;
+     restoreSearch: (payload: { query: string; sourceTab: SearchSource; returnView?: SearchReturnView; }) => void;
+     hideSearchOverlay: () => void;
+@@ -158,7 +175,7 @@ const searchOnlineProviderSongs = async (
+ const SEARCH_COLLECTION_LIMIT = 12;
+ 
+ /**
+- * LOCAL CHANGE (bodian-source): collection search, best-effort.
++ * LOCAL CHANGE (bodian-source): 歌单搜索，best-effort + 可分页。
+  *
+  * 歌单结果是歌曲结果之外的附加信息：provider 没实现、或者这一次失败，都只是"这个分区不显示"，
+  * 绝不能把整次搜索拖成失败 —— 所以这里自己吞掉错误。
+@@ -166,17 +183,18 @@ const SEARCH_COLLECTION_LIMIT = 12;
+ const searchCollectionsForSource = async (
+     sourceTab: SearchSource,
+     query: string,
+-): Promise<ProviderCollection[]> => {
+-    if (sourceTab === 'local' || sourceTab === 'navidrome') return [];
++    offset = 0,
++): Promise<{ items: ProviderCollection[]; hasMore: boolean; nextOffset: number }> => {
++    if (sourceTab === 'local' || sourceTab === 'navidrome') return { items: [], hasMore: false, nextOffset: 0 };
+     try {
+         const page = await omni.searchProviderCollections(sourceTab, query, {
+             limit: SEARCH_COLLECTION_LIMIT,
+-            offset: 0,
++            offset,
+         });
+-        return page.items;
++        return { items: page.items, hasMore: page.hasMore, nextOffset: page.nextOffset };
+     } catch (error) {
+         console.warn('[SearchStore] collection search failed:', error);
+-        return [];
++        return { items: [], hasMore: false, nextOffset: offset };
+     }
+ };
+ 
+@@ -214,6 +232,8 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+     searchSourceTab: 'netease',
+     searchResults: null,
+     searchCollectionResults: null,
++    collectionOffset: 0,
++    collectionHasMore: false,
+     searchReturnView: 'home',
+     isSearchOpen: false,
+     isSearching: false,
+@@ -232,6 +252,7 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+         set({ homeViewTab: tab });
+     },
+     setSearchQuery: (query) => set({ searchQuery: query }),
++    setSearchSourceTab: (tab) => set({ searchSourceTab: tab }),
+     setSearchScrollTop: (scrollTop) => set(state => {
+         const cacheKey = getSearchCacheKey(state.searchQuery, state.searchSourceTab);
+         const cached = state.searchCache[cacheKey];
+@@ -252,7 +273,9 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+             searchSourceTab: sourceTab,
+             searchReturnView: returnView,
+             searchResults: cached?.results ?? null,
+-            searchCollectionResults: null,
++            searchCollectionResults: cached?.collections ?? null,
++            collectionOffset: cached?.collections?.length ?? 0,
++            collectionHasMore: cached?.collectionHasMore ?? false,
+             offset: cached?.offset ?? 0,
+             hasMore: cached?.hasMore ?? false,
+             scrollTop: cached?.scrollTop ?? 0,
+@@ -268,6 +291,8 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+         searchSourceTab: onlineProviderId ?? state.searchSourceTab,
+         searchResults: null,
+         searchCollectionResults: null,
++        collectionOffset: 0,
++        collectionHasMore: false,
+         searchReturnView: 'home',
+         isSearchOpen: false,
+         isSearching: false,
+@@ -296,6 +321,8 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+             requestId,
+             searchResults: null,
+             searchCollectionResults: null,
++            collectionOffset: 0,
++            collectionHasMore: false,
+             offset: 0,
+             hasMore: false,
+             scrollTop: 0,
+@@ -305,14 +332,16 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+             // 歌曲与歌单并行：歌单那条是附加信息，失败也只让分区为空（见 searchCollectionsForSource）
+             const [result, collections] = await Promise.all([
+                 executeSearch(trimmedQuery, sourceTab, 0, get().limit, deps),
+-                searchCollectionsForSource(sourceTab, trimmedQuery),
++                searchCollectionsForSource(sourceTab, trimmedQuery, 0),
+             ]);
+             if (get().requestId !== requestId) {
+                 return true;
+             }
+             set(state => ({
+                 searchResults: result.results,
+-                searchCollectionResults: collections,
++                searchCollectionResults: collections.items,
++                collectionOffset: collections.nextOffset,
++                collectionHasMore: collections.hasMore,
+                 hasMore: result.hasMore,
+                 offset: result.nextOffset,
+                 isSearching: false,
+@@ -320,6 +349,8 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+                     ...state.searchCache,
+                     [getSearchCacheKey(trimmedQuery, sourceTab)]: {
+                         results: result.results,
++                        collections: collections.items,
++                        collectionHasMore: collections.hasMore,
+                         hasMore: result.hasMore,
+                         offset: result.nextOffset,
+                         scrollTop: 0,
+@@ -385,6 +416,8 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+                         ...state.searchCache,
+                         [getSearchCacheKey(searchQuery, searchSourceTab)]: {
+                             results,
++                            collections: state.searchCollectionResults || [],
++                            collectionHasMore: state.collectionHasMore,
+                             hasMore: result.hasMore,
+                             offset: result.nextOffset,
+                             scrollTop: state.scrollTop,
+@@ -402,4 +435,24 @@ export const useSearchNavigationStore = create<SearchNavigationState>((set, get)
+             }
+         }
+     },
++    /**
++     * LOCAL CHANGE (bodian-source): 歌单分区「加载更多」。
++     *
++     * 与歌曲翻页各走各的（歌单是一屏卡片，不参与列表的 hasMore）：
++     * 失败只是不再追加，不影响已经拿到的歌单与歌曲。
++     */
++    loadMoreSearchCollections: async () => {
++        const { searchQuery, searchSourceTab, searchCollectionResults, collectionOffset, collectionHasMore } = get();
++        if (!collectionHasMore || !searchQuery.trim()) return;
++        // 先落下 hasMore=false 当并发锁：两次点击不会打两遍同一页
++        set({ collectionHasMore: false });
++
++        const page = await searchCollectionsForSource(searchSourceTab, searchQuery.trim(), collectionOffset);
++        const merged = [...(searchCollectionResults || []), ...page.items];
++        set({
++            searchCollectionResults: merged,
++            collectionOffset: page.nextOffset,
++            collectionHasMore: page.hasMore,
++        });
++    },
+ }));
+-- 
+2.54.0.windows.1
+

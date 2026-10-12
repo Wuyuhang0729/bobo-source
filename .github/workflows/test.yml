@@ -1,0 +1,42 @@
+# 模组的纯逻辑单测 + 语法检查。
+#
+# 只跑不依赖 folia 本体、也不依赖 node_modules 的部分（模组的 lib/ 与 test/ 是自包含的），
+# 所以在干净 runner 上也能跑通 —— 打包脚本（需要 qrcode 等运行期依赖）不在 CI 范围里。
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  mod:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 模组单测（字段映射 / id 编解码 / 失败分类）
+        run: node tools/test-mod.mjs
+
+      - name: 语法检查（模组入口与工具脚本）
+        run: |
+          set -e
+          node --check folia/mods/bodian-source/index.cjs
+          node --check folia/mods/bodian-source/client.mjs
+          node --check folia/mods/bodian-source/lib/ids.cjs
+          node --check folia/mods/bodian-source/lib/mapping.cjs
+          node --check folia/mods/bodian-source/lib/errors.cjs
+          node --check tools/pack-mod.mjs
+          node --check tools/doctor.mjs
+          node --check tools/probe-bodian.mjs
+          node --check tools/cdp-client.mjs
+          node --check tools/folia-cdp.mjs
+          node --check tools/test-mod.mjs
+          node --check tools/build-installer.mjs
+          node --check tools/sync-mod-deps.mjs
+          node --check tools/sync-bodian-vendor.mjs

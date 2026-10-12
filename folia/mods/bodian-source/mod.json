@@ -1,0 +1,17 @@
+{
+  "folium": 1,
+  "id": "bodian-source",
+  "name": "波点音乐",
+  "version": "0.3.1",
+  "author": "local",
+  "description": "波点音乐在线音源：搜索（歌曲 + 歌单）、播放、逐字歌词、扫码登录、我的歌单 / 收藏专辑 / 电台。⚠️ 需要宿主侧补丁：官方原版 Folia 上只有搜索 / 播放 / 歌词可用。仅供本地自用。",
+  "main": "index.cjs",
+  "client": "client.mjs",
+  "experimental": [
+    "omni.providers"
+  ],
+  "permissions": [
+    "net.fetch",
+    "filesystem.data"
+  ]
+}

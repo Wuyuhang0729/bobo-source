@@ -6,7 +6,7 @@
 把「波点音乐」接成 [Folia](https://github.com/chthollyphile/folia-major) 的在线音源。
 
 > [!IMPORTANT]
-> **它需要一份宿主补丁才能完整工作**：上游 Folia 把模组音源的 `auth` / `userLibrary` / `albums` /
+> **它需要一份宿主补丁才能完整工作，因此不能直接作为模组上限Folia官方**：上游 Folia 把模组音源的 `auth` / `userLibrary` / `albums` /
 > `recommendations` 写死为 `false` 且不转发接口，所以**官方原版 Folia 上只能搜歌、播歌、看歌词**。
 > 补丁与逐项说明见 [`folia-本地改动清单.md`](folia-本地改动清单.md)。
 
